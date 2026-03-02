@@ -51,3 +51,16 @@ Download the release, extract the files, and navigate to the extracted folder. T
 ## Why URDFlyS2U
 
 URDFlyS2U streamlines the process of converting detailed mechanical CAD models into robot description formats, offering precision, convenience, and clarity from design to URDF generation.
+
+## Buy Me a Coffee
+
+Ali Pay
+
+<img src='assets/zfb.png' width="30%" />
+  
+</p>
+
+WeChat
+
+<img src='assets/wechat.png' width="30%" />
+  
