@@ -1,0 +1,10 @@
+/dist/*
+.local
+/node_modules/**
+
+**/*.svg
+**/*.sh
+
+/public/*
+stats.html
+pnpm-lock.yaml
