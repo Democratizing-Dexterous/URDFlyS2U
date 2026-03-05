@@ -114,7 +114,7 @@
       <!-- 底部按钮 -->
       <div class="panel-footer">
         <el-button size="small" @click="handleClose">取消</el-button>
-        <el-button size="default" type="success" :disabled="!canCreate" @click="handleCreate">✅ 创建关节</el-button>
+        <el-button size="default" type="success" :disabled="!canCreate" @click="handleCreate"> 创建关节</el-button>
       </div>
     </div>
   </Teleport>

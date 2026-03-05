@@ -1,8 +1,8 @@
 <template>
   <div class="joint-slider">
     <span class="slider-name" :title="joint.name">{{ joint.name }}</span>
-    <el-slider class="slider-track" :model-value="joint.currentValue" :min="joint.limits.lower"
-      :max="joint.limits.upper" :step="sliderStep" :show-tooltip="false" @update:model-value="handleChange" />
+    <el-slider :model-value="joint.currentValue" :min="joint.limits.lower" :max="joint.limits.upper" :step="sliderStep"
+      :show-tooltip="false" @update:model-value="handleChange" />
     <span class="slider-value">{{ joint.currentValue.toFixed(3) }}</span>
   </div>
 </template>
@@ -33,31 +33,26 @@ function handleChange(val: number | number[]): void {
 .joint-slider {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   padding: 3px 0;
+  width: 100%;
+
 }
 
 .slider-name {
   flex-shrink: 0;
-  width: 90px;
-  font-size: 12px;
+  font-size: 14px;
   color: #303133;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.slider-track {
-  flex: 1;
-  --el-slider-height: 4px;
-  --el-slider-button-size: 12px;
-}
 
 .slider-value {
   flex-shrink: 0;
-  width: 56px;
   text-align: right;
-  font-size: 11px;
+  font-size: 14px;
   color: #606266;
   font-family: monospace;
   letter-spacing: -0.3px;

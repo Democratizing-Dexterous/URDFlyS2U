@@ -46,7 +46,7 @@
             🎯 拾取边
           </el-button>
           <el-button v-else size="default" type="success" @click="handleStopEdgePick">
-            ✅ 完成拾取
+            完成拾取
           </el-button>
           <el-button v-if="urdfStore.edgePickEditJointId === selectedJoint?.id" size="small" type="info" text
             @click="handleFlipNormal">
@@ -130,7 +130,7 @@ const hoverJointId = ref<string | null>(null)
 /** 导航守卫：Solid 绑定进行中时，阻止切换关节 */
 function guardActiveMode(): boolean {
   if (urdfStore.bindingMode.active) {
-    ElMessage.warning('请先点击「✅ 完成绑定」按钮，完成当前 Solid 绑定后再操作')
+    ElMessage.warning('请先点击「 完成绑定」按钮，完成当前 Solid 绑定后再操作')
     return true
   }
   return false

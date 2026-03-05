@@ -134,10 +134,10 @@ export class StepLoader {
       return { valid: false, error: '仅支持 .step 或 .stp 格式文件' }
     }
 
-    // 文件大小限制 (200MB)
-    const maxSize = 200 * 1024 * 1024
+    // 文件大小限制 (300MB)
+    const maxSize = 300 * 1024 * 1024
     if (file.size > maxSize) {
-      return { valid: false, error: '文件大小超过 200MB 限制' }
+      return { valid: false, error: '文件大小超过 300MB 限制' }
     }
 
     return { valid: true, file }

@@ -155,7 +155,7 @@ import { useStepViewerStore } from '../../stores/useStepViewerStore'
 const urdfStore = useURDFStore()
 const stepStore = useStepViewerStore()
 
-const openPanels = ref<string[]>(['solids'])
+const openPanels = ref<string[]>(['solids', 'physics']) // 默认展开的面板
 
 const link = computed(() => {
   if (!urdfStore.selectedLinkId) return null

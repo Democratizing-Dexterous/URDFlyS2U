@@ -41,7 +41,7 @@ export default defineConfig({
     },
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:5000", // 目标服务器地址
+        target: "http://127.0.0.1:8000/", // 目标服务器地址
         changeOrigin: true, // 支持虚拟托管
         rewrite: path => path.replace(/^\/api/, "") // 可选：重写路径
       }

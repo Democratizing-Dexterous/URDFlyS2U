@@ -2,12 +2,6 @@
   <div class="step-viewer-toolbar">
     <!-- 左侧：侧栏切换 + 文件上传 -->
     <div class="toolbar-left">
-      <el-tooltip content="切换侧栏" placement="bottom">
-        <el-button :icon="Fold" @click="$emit('toggleSidePanel')" class="sidebar-toggle" />
-      </el-tooltip>
-
-      <el-divider direction="vertical" />
-
       <div class="toolbar-section">
         <el-tooltip :content="occtReady ? '选择并导入 STEP / STP 模型文件' : '正在加载 OpenCASCADE 引擎...'" placement="bottom">
           <el-button type="primary" :loading="isLoading || !occtReady" :icon="UploadFilled"
@@ -15,6 +9,11 @@
             {{ isLoading ? '加载中...' : (!occtReady ? '引擎加载中...' : '导入模型') }}
           </el-button>
         </el-tooltip>
+        <!-- WASM 加载进度条 -->
+        <div v-if="!occtReady" class="wasm-progress">
+          <el-progress :percentage="Math.round(occtLoadProgress ?? 0)" :stroke-width="14" :show-text="false" />
+          <span class="wasm-progress-text">OpenCASCADE WASM 加载中 ({{ Math.round(occtLoadProgress ?? 0) }}%)</span>
+        </div>
         <span v-if="fileName" class="file-name" :title="fileName">{{ fileName }}</span>
       </div>
 
@@ -37,7 +36,7 @@
               <div class="uph-tags">
                 <el-tag size="small" type="primary" effect="light" round>.STEP</el-tag>
                 <el-tag size="small" type="primary" effect="light" round>.STP</el-tag>
-                <span class="uph-size-note">不限文件大小</span>
+                <span class="uph-size-note">最大上传限制300MB</span>
               </div>
             </div>
           </el-upload>
@@ -77,7 +76,7 @@
         </template>
       </el-dialog>
     </div>
-
+    <stats />
     <!-- 中间：显示控制 + 测量工具 -->
     <div class="toolbar-center" v-if="hasModel">
       <!-- 显示控制 -->
@@ -155,6 +154,19 @@
           FPS
         </el-button>
       </el-tooltip>
+
+      <el-divider direction="vertical" />
+
+      <!-- GitHub 链接 -->
+      <el-tooltip content="GitHub 仓库" placement="bottom">
+        <el-button class="github-btn" text @click="openGitHub">
+          <svg class="github-icon" viewBox="0 0 1024 1024" width="18" height="18" xmlns="http://www.w3.org/2000/svg">
+            <path fill-rule="evenodd" clip-rule="evenodd"
+              d="M8 0C3.58 0 0 3.58 0 8C0 11.54 2.29 14.53 5.47 15.59C5.87 15.66 6.02 15.42 6.02 15.21C6.02 15.02 6.01 14.39 6.01 13.72C4 14.09 3.48 13.23 3.32 12.78C3.23 12.55 2.84 11.84 2.5 11.65C2.22 11.5 1.82 11.13 2.49 11.12C3.12 11.11 3.57 11.7 3.72 11.94C4.44 13.15 5.59 12.81 6.05 12.6C6.12 12.08 6.33 11.73 6.56 11.53C4.78 11.33 2.92 10.64 2.92 7.58C2.92 6.71 3.23 5.99 3.74 5.43C3.66 5.23 3.38 4.41 3.82 3.31C3.82 3.31 4.49 3.1 6.02 4.13C6.66 3.95 7.34 3.86 8.02 3.86C8.7 3.86 9.38 3.95 10.02 4.13C11.55 3.09 12.22 3.31 12.22 3.31C12.66 4.41 12.38 5.23 12.3 5.43C12.81 5.99 13.12 6.7 13.12 7.58C13.12 10.65 11.25 11.33 9.47 11.53C9.76 11.78 10.01 12.26 10.01 13.01C10.01 14.08 10 14.94 10 15.21C10 15.42 10.15 15.67 10.55 15.59C13.71 14.53 16 11.53 16 8C16 3.58 12.42 0 8 0Z"
+              transform="scale(64)" fill="currentColor" />
+          </svg>
+        </el-button>
+      </el-tooltip>
     </div>
   </div>
 </template>
@@ -169,7 +181,6 @@ import {
   Aim,
   RefreshRight,
   DataLine,
-  Fold,
   Document,
   Close,
   CircleCheckFilled,
@@ -187,6 +198,8 @@ const props = defineProps<{
   showStats: boolean
   /** OpenCASCADE WASM 是否已加载完成 */
   occtReady: boolean
+  /** WASM 加载进度 0-100 */
+  occtLoadProgress?: number
   /** 画线测量模式是否激活 */
   isLineMeasureActive?: boolean
   /** 当前透明度（0~100） */
@@ -207,7 +220,6 @@ const emit = defineEmits<{
   (e: 'clearSelection'): void
   (e: 'resetView'): void
   (e: 'toggleStats'): void
-  (e: 'toggleSidePanel'): void
   (e: 'toggleLineMeasure'): void
   (e: 'switchViewMode', mode: ViewMode): void
 }>()
@@ -274,6 +286,10 @@ watch(() => props.opacity, (val) => {
 function handleOpacityInput(val: number | number[]): void {
   const v = Array.isArray(val) ? val[0] : val
   emit('opacityChange', v)
+}
+
+function openGitHub(): void {
+  window.open('https://github.com/Democratizing-Dexterous/URDFlyS2U', '_blank', 'noopener,noreferrer')
 }
 
 
@@ -374,6 +390,37 @@ function handleOpacityInput(val: number | number[]): void {
       --el-slider-height: 4px;
       --el-slider-button-size: 14px;
     }
+  }
+}
+
+.wasm-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+
+  .el-progress {
+    width: 100px;
+  }
+
+  .wasm-progress-text {
+    font-size: 11px;
+    color: #909399;
+    white-space: nowrap;
+  }
+}
+
+.github-btn {
+  padding: 6px;
+  font-size: 0;
+
+  .github-icon {
+    color: #606266;
+    transition: color 0.2s;
+  }
+
+  &:hover .github-icon {
+    color: #303133;
   }
 }
 

@@ -1,14 +1,15 @@
 <template>
   <div class="step-viewer" ref="viewerRef">
+
     <!-- 工具栏 -->
     <Toolbar :file-name="store.currentFileName" :is-loading="store.isLoading" :has-model="store.hasModel"
       :has-selection="store.selectedFeatures.length > 0" :show-axes="store.showAxes" :show-grid="store.showGrid"
-      :show-stats="showStats" :occt-ready="occtReady" :is-line-measure-active="store.isLineMeasureActive"
-      :opacity="opacityPercent" :granularity-mode="store.granularityMode" :view-mode="urdfStore.viewMode"
-      @upload="handleFileUpload" @fit-view="handleFitView" @toggle-axes="handleToggleAxes"
-      @toggle-grid="handleToggleGrid" @opacity-change="handleOpacityChange"
-      @granularity-change="handleGranularityChange" @clear-selection="handleClearSelection"
-      @reset-view="handleResetView" @toggle-stats="handleToggleStats" @toggle-side-panel="handleToggleSidePanel"
+      :show-stats="showStats" :occt-ready="occtReady" :occt-load-progress="occtLoadProgress"
+      :is-line-measure-active="store.isLineMeasureActive" :opacity="opacityPercent"
+      :granularity-mode="store.granularityMode" :view-mode="urdfStore.viewMode" @upload="handleFileUpload"
+      @fit-view="handleFitView" @toggle-axes="handleToggleAxes" @toggle-grid="handleToggleGrid"
+      @opacity-change="handleOpacityChange" @granularity-change="handleGranularityChange"
+      @clear-selection="handleClearSelection" @reset-view="handleResetView" @toggle-stats="handleToggleStats"
       @toggle-line-measure="handleToggleLineMeasure" @switch-view-mode="handleSwitchViewMode" />
 
     <!-- 主内容区域 -->
@@ -34,7 +35,7 @@
         <!-- 绑定模式提示 -->
         <div class="binding-overlay" v-if="urdfStore.bindingMode.active">
           <el-tag type="warning" effect="dark">
-            🎯 点击 3D 场景中的 Solid 绑定到 Link
+            点击 3D 场景中的 Solid 绑定到 Link
             <el-button size="small" text style="color: #fff" @click="urdfStore.stopBindingMode()">完成</el-button>
           </el-tag>
         </div>
@@ -42,23 +43,11 @@
         <!-- 导出进度提示 -->
         <div class="binding-overlay" v-if="urdfStore.exporting">
           <el-tag type="info" effect="dark">
-            ⏳ {{ urdfStore.exportProgress || '正在导出...' }}
+            {{ urdfStore.exportProgress || '正在导出...' }}
           </el-tag>
         </div>
 
-        <!-- 空状态 -->
-        <div class="empty-overlay" v-if="!store.hasModel && !store.isLoading">
-          <div class="empty-content">
-            <svg viewBox="0 0 200 200" width="100" height="100">
-              <rect x="50" y="30" width="100" height="140" rx="8" fill="#e6e8eb" stroke="#c0c4cc" stroke-width="2" />
-              <line x1="70" y1="60" x2="130" y2="60" stroke="#c0c4cc" stroke-width="2" />
-              <line x1="70" y1="80" x2="110" y2="80" stroke="#c0c4cc" stroke-width="2" />
-              <line x1="70" y1="100" x2="120" y2="100" stroke="#c0c4cc" stroke-width="2" />
-              <path d="M90 130 L100 140 L120 110" stroke="#67c23a" stroke-width="3" fill="none" />
-            </svg>
-            <p class="empty-text">{{ emptyDescription }}</p>
-          </div>
-        </div>
+
       </div>
 
       <!-- Preview 模式：右侧信息面板 -->
@@ -70,12 +59,22 @@
         @clear-line-measurements="handleClearLineMeasurements" />
 
       <!-- URDF 模式：右侧属性面板 -->
-      <URDFRightPanel v-if="urdfStore.viewMode === 'urdf' && store.hasModel" @flip-normal="handleFlipNormal" />
+      <URDFRightPanel v-if="urdfStore.viewMode === 'urdf' && store.hasModel" @flip-normal="handleFlipNormal"
+        @toggle-f-k-panel="fkPanelVisible = !fkPanelVisible" />
+
     </div>
+
+    <!-- 浮动关节控制面板 -->
+    <FloatingJointControl v-if="urdfStore.viewMode === 'urdf'" :visible="fkPanelVisible"
+      @close="fkPanelVisible = false" />
 
     <!-- Joint 创建向导 -->
     <JointWizard v-if="urdfStore.viewMode === 'urdf'" ref="jointWizardRef" @created="handleJointCreated"
       @start-edge-pick="startEdgePickMode" @stop-edge-pick="stopEdgePickMode" @flip-normal="handleFlipNormal" />
+
+
+
+
 
     <!-- 状态栏 -->
     <div class="status-bar">
@@ -107,8 +106,10 @@ import SidePanel from './SidePanel.vue'
 import RightPanel from './RightPanel.vue'
 import StatsPanel from './StatsPanel.vue'
 import LoadingOverlay from './LoadingOverlay.vue'
+
 import URDFLeftPanel from './URDFBuilder/URDFLeftPanel.vue'
 import URDFRightPanel from './URDFBuilder/URDFRightPanel.vue'
+import FloatingJointControl from './URDFBuilder/FloatingJointControl.vue'
 import JointWizard from './URDFBuilder/JointWizard.vue'
 import { useStepViewerStore } from '../stores/useStepViewerStore'
 import { useURDFStore } from '../stores/useURDFStore'
@@ -162,6 +163,16 @@ const frameDrawCalls = ref(0)
 
 // OCCT 加载状态
 const occtReady = ref(isOcctLoaded())
+/** 模拟 WASM 加载进度 0–100 */
+const occtLoadProgress = ref(isOcctLoaded() ? 100 : 0)
+
+// 浮动关节控制面板
+const fkPanelVisible = ref(false)
+
+
+const exportCompleteAdVisible = ref(false)
+
+
 
 // 核心模块实例
 let stepLoader: StepLoader | null = null
@@ -190,11 +201,7 @@ const totalFeatures = computed(() => {
   return store.solids.reduce((sum, solid) => sum + solid.features.length, 0)
 })
 
-const emptyDescription = computed(() => {
-  return occtReady.value
-    ? '请上传 STEP 文件 (.step / .stp)'
-    : '正在加载 OpenCASCADE，请稍候...'
-})
+
 
 const opacityPercent = computed(() => {
   return Math.round(store.globalOpacity * 100)
@@ -205,13 +212,27 @@ const opacityPercent = computed(() => {
 onMounted(async () => {
   await nextTick()
 
-  // 预加载 OpenCASCADE WASM
+  // 预加载 OpenCASCADE WASM（带模拟进度）
+  let progressTimer: ReturnType<typeof setInterval> | null = null
+  if (!occtReady.value) {
+    occtLoadProgress.value = 5
+    progressTimer = setInterval(() => {
+      if (occtLoadProgress.value < 90) {
+        occtLoadProgress.value += Math.random() * 8 + 2
+        if (occtLoadProgress.value > 90) occtLoadProgress.value = 90
+      }
+    }, 600)
+  }
   preloadOcct()
     .then(() => {
+      if (progressTimer) clearInterval(progressTimer)
+      occtLoadProgress.value = 100
       occtReady.value = true
       console.log('OpenCASCADE WASM 预加载完成')
     })
     .catch(err => {
+      if (progressTimer) clearInterval(progressTimer)
+      occtLoadProgress.value = 0
       console.error('OpenCASCADE 预加载失败:', err)
     })
 
@@ -600,6 +621,9 @@ async function handleFileUpload(file: File): Promise<void> {
       message: '加载完成'
     })
 
+    // ★ 导入完成后自动切换到 URDF 视图
+    handleSwitchViewMode('urdf')
+
     ElMessage.success('模型加载成功')
   } catch (error) {
     console.error('加载失败:', error)
@@ -703,7 +727,7 @@ function handleClearSelection(): void {
   // 绑定模式 / 边拾取模式下禁止清除选择（保护当前工作现场）
   if (urdfStore.viewMode === 'urdf') {
     if (urdfStore.bindingMode.active) {
-      ElMessage.warning('请先点击「✅ 完成绑定」按钮，完成当前 Solid 绑定后再操作')
+      ElMessage.warning('请先点击「 完成绑定」按钮，完成当前 Solid 绑定后再操作')
       return
     }
     if (urdfStore.edgePickEditJointId) {
@@ -818,6 +842,17 @@ function handleClearAll(): void {
     lineMeasurementTool?.deactivate()
     selectionManager?.setEnabled(true)
   }
+
+  // ★ 清理 URDF 状态（修复重载模型 bug）
+  urdfStore.clearAll()
+  frameVisualizer?.dispose()
+  frameVisualizer = null
+  forwardKinematics = null
+  snapVisualizer?.dispose()
+  snapVisualizer = null
+  currentSnapData = null
+  edgePickMode = false
+
   sceneManager?.clearModels()
   store.clearModel()
   modelTriangles.value = 0
@@ -1190,6 +1225,7 @@ async function handleExportURDF(): Promise<void> {
     URL.revokeObjectURL(url)
 
     ElMessage.success('URDF 导出成功')
+    exportCompleteAdVisible.value = true
   } catch (err) {
     ElMessage.error(`导出失败: ${(err as Error).message}`)
   } finally {

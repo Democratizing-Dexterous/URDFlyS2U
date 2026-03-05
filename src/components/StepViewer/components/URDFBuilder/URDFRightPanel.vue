@@ -1,42 +1,12 @@
 <template>
   <div class="urdf-right-panel">
 
-    <!-- ===== 上半：FK 关节控制 ===== -->
-    <div class="panel-section" :class="fkCollapsed ? 'collapsed' : 'expanded'">
-      <div class="section-header" @click="fkCollapsed = !fkCollapsed">
-        <span class="section-title">🎛️ 关节控制</span>
-        <div class="header-right">
-          <template v-if="!fkCollapsed">
-            <el-button size="small" text @click.stop="urdfStore.resetJoints()">归零</el-button>
-            <el-button size="small" text @click.stop="urdfStore.randomizeJoints()">随机</el-button>
-          </template>
-          <el-icon class="collapse-arrow">
-            <ArrowDown v-if="!fkCollapsed" />
-            <ArrowRight v-else />
-          </el-icon>
-        </div>
-      </div>
-      <div v-show="!fkCollapsed" class="section-body">
-        <div v-if="urdfStore.activeJoints.length > 0" class="slider-list">
-          <JointSlider v-for="joint in urdfStore.activeJoints" :key="joint.id" :joint="joint" />
-        </div>
-        <div v-else class="empty-hint">暂无可控关节（Fixed 不可控）</div>
-      </div>
-    </div>
-
-    <!-- 分隔线 -->
-    <div class="section-divider" />
-
-    <!-- ===== 下半：上下文属性面板 ===== -->
-    <div class="panel-section" :class="propCollapsed ? 'collapsed' : 'expanded'">
-      <div class="section-header" @click="propCollapsed = !propCollapsed">
+    <!-- ===== 上部：上下文属性面板（Link / Joint） ===== -->
+    <div class="panel-section expanded">
+      <div class="section-header">
         <span class="section-title">{{ contextTitle }}</span>
-        <el-icon class="collapse-arrow">
-          <ArrowDown v-if="!propCollapsed" />
-          <ArrowRight v-else />
-        </el-icon>
       </div>
-      <div v-show="!propCollapsed" class="section-body">
+      <div class="section-body">
         <URDFJointProperties v-if="urdfStore.selectedJointId" @flip-normal="$emit('flipNormal')" />
         <URDFLinkProperties v-else-if="urdfStore.selectedLinkId" />
         <div v-else class="empty-hint context-empty">
@@ -49,25 +19,33 @@
       </div>
     </div>
 
+    <!-- 分隔线 -->
+    <div class="section-divider" />
+
+    <!-- ===== 下部：关节控制打开按钮 ===== -->
+    <div class="fk-launch-bar">
+      <el-button type="primary" plain @click="$emit('toggleFKPanel')">
+        关节控制面板
+      </el-button>
+      <span v-if="urdfStore.activeJoints.length" class="fk-count">{{ urdfStore.activeJoints.length }} 个可控关节</span>
+    </div>
+
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { ArrowDown, ArrowRight, Connection } from '@element-plus/icons-vue'
+import { computed } from 'vue'
+import { Connection } from '@element-plus/icons-vue'
 import { useURDFStore } from '../../stores/useURDFStore'
-import JointSlider from './JointSlider.vue'
 import URDFJointProperties from './URDFJointProperties.vue'
 import URDFLinkProperties from './URDFLinkProperties.vue'
 
 const emit = defineEmits<{
   (e: 'flipNormal'): void
+  (e: 'toggleFKPanel'): void
 }>()
 
 const urdfStore = useURDFStore()
-
-const fkCollapsed = ref(false)
-const propCollapsed = ref(false)
 
 const contextTitle = computed(() => {
   if (urdfStore.selectedJointId) {
@@ -100,14 +78,9 @@ const contextTitle = computed(() => {
   flex-direction: column;
   overflow: hidden;
   min-height: 36px;
-  transition: flex 0.2s ease;
 
   &.expanded {
     flex: 1;
-  }
-
-  &.collapsed {
-    flex: 0 0 36px;
   }
 }
 
@@ -126,13 +99,8 @@ const contextTitle = computed(() => {
   height: 36px;
   background: #fafafa;
   border-bottom: 1px solid #f0f2f5;
-  cursor: pointer;
   user-select: none;
   flex-shrink: 0;
-
-  &:hover {
-    background: #f4f6f9;
-  }
 
   .section-title {
     font-size: 12px;
@@ -142,19 +110,6 @@ const contextTitle = computed(() => {
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
-  }
-
-  .header-right {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    flex-shrink: 0;
-  }
-
-  .collapse-arrow {
-    font-size: 12px;
-    color: #909399;
-    margin-left: 4px;
   }
 }
 
@@ -172,12 +127,6 @@ const contextTitle = computed(() => {
     background: #dcdfe6;
     border-radius: 2px;
   }
-}
-
-.slider-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }
 
 .empty-hint {
@@ -198,6 +147,21 @@ const contextTitle = computed(() => {
     margin: 0;
     font-size: 12px;
     color: #c0c4cc;
+  }
+}
+
+.fk-launch-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #fafafa;
+  border-top: 1px solid #f0f2f5;
+
+  .fk-count {
+    font-size: 11px;
+    color: #909399;
   }
 }
 </style>

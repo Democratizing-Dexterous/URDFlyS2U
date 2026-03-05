@@ -4,17 +4,8 @@ import { createRouter, createWebHistory } from "vue-router";
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
-    { path: "/", name: "root", redirect: "/home" },
-    {
-      path: "/home",
-      name: "home",
-      component: () => import("@/views/home.vue"),
-      // redirect: "/home/dataAnalyze",
-      // children: [
+    { path: "/", name: "root", component: () => import("@/views/home.vue") },
 
-
-      // ]
-    }
   ]
 });
 /**

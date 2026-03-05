@@ -52,7 +52,7 @@ export const useStepViewerStore = defineStore('stepViewer', () => {
 
   // 显示设置
   const showAxes = ref(false)
-  const showGrid = ref(false)
+  const showGrid = ref(true)
   const globalOpacity = ref(0.3)
   const isTransparent = ref(false)
 
@@ -316,7 +316,7 @@ export const useStepViewerStore = defineStore('stepViewer', () => {
    * 设置侧栏宽度
    */
   function setSidePanelWidth(width: number): void {
-    sidePanelWidth.value = Math.max(200, Math.min(500, width))
+    sidePanelWidth.value = Math.max(120, Math.min(500, width))
   }
 
   /**

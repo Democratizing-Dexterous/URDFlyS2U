@@ -57,7 +57,7 @@
       <el-tag type="warning" size="small">
         🎯 点击 3D 视图中的 Solid 进行绑定
       </el-tag>
-      <el-button size="default" type="success" @click="urdfStore.stopBindingMode()">✅ 完成绑定</el-button>
+      <el-button size="default" type="success" @click="urdfStore.stopBindingMode()"> 完成绑定</el-button>
     </div>
 
     <div v-if="urdfStore.robot.links.length === 0" class="empty-hint">
@@ -93,7 +93,7 @@ const selectedLink = computed(() => {
 /** 导航守卫：Solid 绑定进行中时，阻止切换连杆 */
 function guardActiveMode(): boolean {
   if (urdfStore.bindingMode.active) {
-    ElMessage.warning('请先点击「✅ 完成绑定」按钮，完成当前 Solid 绑定后再操作')
+    ElMessage.warning('请先点击「 完成绑定」按钮，完成当前 Solid 绑定后再操作')
     return true
   }
   return false
@@ -151,7 +151,7 @@ function cancelRename(): void {
 function handleStartBinding(linkId: string): void {
   // 已在为其他 Link 绑定时阻止；同一 Link 允许重复点击
   if (urdfStore.bindingMode.active && urdfStore.bindingMode.targetLinkId !== linkId) {
-    ElMessage.warning('请先点击「✅ 完成绑定」按钮，完成当前 Solid 绑定后再切换')
+    ElMessage.warning('请先点击「 完成绑定」按钮，完成当前 Solid 绑定后再切换')
     return
   }
   urdfStore.startBindingMode(linkId)

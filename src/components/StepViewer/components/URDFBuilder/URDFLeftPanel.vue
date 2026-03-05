@@ -23,10 +23,10 @@
               <Share v-else />
             </el-icon>
 
-            <!-- 节点名称（Link 支持内联重命名） -->
-            <el-input v-if="data.nodeType === 'link' && editingId === data.id" v-model="editingName" size="small"
-              @blur="finishRename(data)" @keydown.enter.stop="finishRename(data)" @keydown.escape.stop="cancelRename"
-              @click.stop autofocus class="rename-input" />
+            <!-- 节点名称（Link / Joint 支持内联重命名） -->
+            <el-input v-if="editingId === data.id" v-model="editingName" size="small" @blur="finishRename(data)"
+              @keydown.enter.stop="finishRename(data)" @keydown.escape.stop="cancelRename" @click.stop autofocus
+              class="rename-input" />
             <span v-else class="node-label" :title="data.label">{{ data.label }}</span>
 
             <!-- 徽标 -->
@@ -56,6 +56,9 @@
               </el-tooltip>
             </template>
             <template v-else>
+              <el-tooltip content="重命名" placement="top" :show-after="600">
+                <el-button class="node-btn" size="small" text :icon="Edit" @click.stop="startRename(data)" />
+              </el-tooltip>
               <el-tooltip content="删除关节" placement="top" :show-after="600">
                 <el-button class="node-btn node-btn--danger" size="small" text :icon="Delete"
                   @click.stop="handleDeleteJoint(data)" />
@@ -111,7 +114,7 @@ const editingName = ref('')
 // ——— 导航守卫：Solid 绑定 / 关节轴线拾取进行中时，阻止切换 ———
 function guardActiveMode(): boolean {
   if (urdfStore.bindingMode.active) {
-    ElMessage.warning('请先点击「✅ 完成绑定」按钮，完成当前 Solid 绑定后再操作')
+    ElMessage.warning('请先点击「 完成绑定」按钮，完成当前 Solid 绑定后再操作')
     return true
   }
   if (urdfStore.edgePickEditJointId) {
@@ -127,7 +130,7 @@ function handleNodeClick(data: URDFTreeNode): void {
   // 绑定 / 拾取进行中：允许点击当前目标节点（静默），禁止切换到其他节点
   if (urdfStore.bindingMode.active) {
     if (data.id !== urdfStore.bindingMode.targetLinkId) {
-      ElMessage.warning('请先点击「✅ 完成绑定」按钮，完成当前 Solid 绑定后再切换')
+      ElMessage.warning('请先点击「 完成绑定」按钮，完成当前 Solid 绑定后再切换')
     }
     return
   }
@@ -186,7 +189,7 @@ function handleAddChildLink(data: URDFTreeNode): void {
 function handleBindSolid(data: URDFTreeNode): void {
   // 已在为其他 Link 绑定时阻止；同一 Link 重复点击允许
   if (urdfStore.bindingMode.active && urdfStore.bindingMode.targetLinkId !== data.id) {
-    ElMessage.warning('请先点击「✅ 完成绑定」按钮，完成当前 Solid 绑定后再切换')
+    ElMessage.warning('请先点击「 完成绑定」按钮，完成当前 Solid 绑定后再切换')
     return
   }
   if (urdfStore.edgePickEditJointId) {
@@ -207,7 +210,13 @@ function startRename(data: URDFTreeNode): void {
 
 function finishRename(data: URDFTreeNode): void {
   const name = editingName.value.trim()
-  if (name) urdfStore.renameLink(data.id, name)
+  if (name) {
+    if (data.nodeType === 'link') {
+      urdfStore.renameLink(data.id, name)
+    } else {
+      urdfStore.renameJoint(data.id, name)
+    }
+  }
   editingId.value = null
 }
 

@@ -272,6 +272,13 @@ export const useURDFStore = defineStore('urdf', () => {
     }
   }
 
+  function renameJoint(jointId: string, newName: string): void {
+    const joint = jointMap.value.get(jointId)
+    if (joint) {
+      joint.name = newName
+    }
+  }
+
   function bindSolid(linkId: string, solidId: string): void {
     const link = linkMap.value.get(linkId)
     if (link && !link.solidIds.includes(solidId)) {
@@ -446,9 +453,16 @@ export const useURDFStore = defineStore('urdf', () => {
     selectedChainId.value = null
     bindingMode.value = { active: false, targetLinkId: null }
     jointWizardVisible.value = false
+    jointWizardStep.value = 'select-links'
+    edgePickEditJointId.value = null
     baseLinkOrigin.value = null
     baseLinkRPY.value = null
     basePickMode.value = false
+    showFrames.value = true
+    axisHelperScale.value = 1.0
+    linkWorldTransforms.value = new Map()
+    exporting.value = false
+    exportProgress.value = ''
     _nextLinkId = 1
     _nextJointId = 1
   }
@@ -496,6 +510,7 @@ export const useURDFStore = defineStore('urdf', () => {
     addLink,
     removeLink,
     renameLink,
+    renameJoint,
     bindSolid,
     unbindSolid,
 
