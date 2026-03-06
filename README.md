@@ -42,6 +42,20 @@ It combines precise geometric feature extraction with intuitive configuration an
 - 🔧 **Revolute and prismatic joint support**
   Fully supports both joint types for flexible robot modeling.
 
+- 📊 **Hierarchical model tree viewer**
+  Browse and manage all imported solids with an intuitive tree structure. Easily select, hide, or organize components for better workflow control.
+
+<p align="center">
+  <img src='assets/solid_visible.png' width="80%" />
+</p>
+
+
+- 🎯 **Fine-tunable axis offset controls**
+  Adjust joint axis positions in XYZ directions with precision controls. Fine-tune axis offsets to achieve perfect alignment and accurate joint placement in your robot model.
+
+<p align="center">
+  <img src='assets/joint_axis_offset.png' width="80%" />
+</p>
 ## Video Tutorial
 
 [bilibili](https://www.bilibili.com/video/BV168PjzrErB?vd_source=b2a1004302917395bdd25677ed784bdb)
