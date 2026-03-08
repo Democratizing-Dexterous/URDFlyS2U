@@ -44,7 +44,18 @@ const emit = defineEmits<{
 // 面板状态
 const panelRef = ref<HTMLElement>()
 const panelWidth = ref(300)
-const panelPos = reactive({ x: 340, y: 80 })
+
+const RIGHT_COLUMN_WIDTH = 160
+const PROPERTY_PANEL_WIDTH = 300
+const PANEL_TOP_OFFSET = 80
+const PANEL_EDGE_GAP = 12
+
+function getDefaultPanelX(width: number): number {
+  const x = window.innerWidth - RIGHT_COLUMN_WIDTH - PROPERTY_PANEL_WIDTH - width - PANEL_EDGE_GAP
+  return Math.max(PANEL_EDGE_GAP, x)
+}
+
+const panelPos = reactive({ x: getDefaultPanelX(panelWidth.value), y: PANEL_TOP_OFFSET })
 
 function handleTreeSelect(node: TreeNode, multi: boolean): void {
   emit('tree-select', node, multi)

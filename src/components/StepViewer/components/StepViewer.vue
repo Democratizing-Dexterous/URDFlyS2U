@@ -569,7 +569,8 @@ async function handleFileUpload(file: File): Promise<void> {
 
     // ★ 导入完成后自动初始化 URDF 模块
     initURDFModules()
-
+    // 上传并解析成功后默认打开模型结构树面板
+    modelTreeVisible.value = true
     ElMessage.success('模型加载成功')
   } catch (error) {
     console.error('加载失败:', error)

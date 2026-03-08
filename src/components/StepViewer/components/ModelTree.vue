@@ -73,9 +73,7 @@ const emit = defineEmits<{
 
 const treeRef = ref()
 const treeContainerRef = ref<HTMLElement>()
-/** el-tree-v2 虚拟滚动必须传数字像素高度，通过 ResizeObserver 跟踪容器实际高度 */
-const treeHeight = ref(600)
-/** 标记选择来源：树点击时为 true，防止 watcher 反向 scrollTo 导致虚拟列表跳位 */
+const treeHeight = ref(Math.max(200, Math.floor(window.innerHeight * 0.7 - 80)))
 let selectionFromTree = false
 
 
@@ -85,9 +83,13 @@ const treeProps = {
   value: 'id'
 }
 
-/** 当前高亮的节点 key */
+/** 当前高亮的节点 key — 优先 solid_N 格式（树中一定存在），避免 face ID 无法匹配 */
 const currentNodeKey = computed(() => {
-  return store.selectedTreeNodeIds[0] || ''
+  const ids = store.selectedTreeNodeIds
+  return ids.find(id => /^solid_\d+$/.test(id))
+    || ids.find(id => id.includes('_edge_'))
+    || ids[0]
+    || ''
 })
 
 /**
@@ -211,38 +213,31 @@ function findAncestorIds(targetId: string): string[] {
   return ancestors
 }
 
-/**
- * 容器尺寸跟踪（el-tree-v2 需要精确的像素高度）
- */
-let resizeObserver: ResizeObserver | null = null
+function handleWindowResize() {
+  nextTick(() => {
+    if (treeContainerRef.value) {
+      const h = treeContainerRef.value.clientHeight
+      if (h > 100) treeHeight.value = h
+    }
+  })
+}
 
 onMounted(() => {
   nextTick(() => {
     if (treeContainerRef.value) {
-      treeHeight.value = Math.max(100, treeContainerRef.value.clientHeight)
-      resizeObserver = new ResizeObserver(() => {
-        if (treeContainerRef.value) {
-          treeHeight.value = Math.max(100, treeContainerRef.value.clientHeight)
-        }
-      })
-      resizeObserver.observe(treeContainerRef.value)
+      const h = treeContainerRef.value.clientHeight
+      if (h > 100) treeHeight.value = h
     }
   })
+  window.addEventListener('resize', handleWindowResize)
 })
 
 onUnmounted(() => {
-  resizeObserver?.disconnect()
-  resizeObserver = null
+  window.removeEventListener('resize', handleWindowResize)
 })
 
 /**
  * 监听 3D 侧选中变化，同步高亮 + 滚动到对应树节点
- *
- * 核心要点：
- * el-tree-v2 内部 watch(defaultExpandedKeys) 没有 { deep: true }，
- * 所以对 expandedTreeNodeIds 做 .push() 不会触发内部 expandedKeySet 更新。
- * 必须通过 setExpandedKeys() 强制同步内部状态，否则 flattenTree 是错的，
- * scrollTo 定位到错误位置导致列表空白。
  */
 watch(() => store.selectedTreeNodeIds, async (ids) => {
   if (!ids.length || !treeRef.value) {
@@ -250,21 +245,21 @@ watch(() => store.selectedTreeNodeIds, async (ids) => {
     return
   }
 
-  // 选择来自树点击，用户已看到该节点，跳过滚动
   if (selectionFromTree) {
     selectionFromTree = false
     return
   }
 
-  // 滚动目标：优先选择叶子级节点（edge），父级 solid 已展开
-  // 如果有边级 ID，直接滚动到该节点；否则取 solid 级
+  // 选择滚动目标：
+  // 树中只有 solid_N 和 solid_N_edge_M 两种节点，没有 solid_N_face_M
+  // 3D 点击面时 ids 可能包含 face ID（如 solid_5_face_0），必须跳过
   let scrollTarget = ids.find(id => id.includes('_edge_'))
   if (!scrollTarget) {
-    scrollTarget = ids.find(id => !id.includes('_edge_'))
+    scrollTarget = ids.find(id => /^solid_\d+$/.test(id))
     if (!scrollTarget) scrollTarget = ids[0]
   }
 
-  // ★ 确保目标节点的所有祖先都已展开
+  // 展开目标节点的所有祖先
   const ancestors = findAncestorIds(scrollTarget)
   for (const id of ancestors) {
     if (!store.expandedTreeNodeIds.includes(id)) {
@@ -272,19 +267,15 @@ watch(() => store.selectedTreeNodeIds, async (ids) => {
     }
   }
 
-  // ★ 强制同步 el-tree-v2 内部展开状态（.push() 不会触发它的 prop watcher）
+  // 强制同步 el-tree-v2 内部展开状态
   treeRef.value.setExpandedKeys([...store.expandedTreeNodeIds])
 
-  // 等 Vue 响应式 + 虚拟列表重算 flattenTree
+  // 等待虚拟列表完成重算
   await nextTick()
   await nextTick()
 
-  // 滚动到目标节点（scrollToNode 按 key 查 flattenTree 索引，scrollTo 是像素偏移）
-  try {
-    treeRef.value?.scrollToNode?.(scrollTarget, 'center')
-  } catch {
-    // 目标节点不在可见列表中，忽略
-  }
+  // 使用官方 scrollToNode API 滚动到目标
+  treeRef.value.scrollToNode(scrollTarget, 'center')
 }, { flush: 'post' })
 </script>
 
@@ -418,8 +409,7 @@ watch(() => store.selectedTreeNodeIds, async (ids) => {
 }
 
 :deep(.el-tree-node__content) {
-  height: auto !important;
-  min-height: 28px;
+  height: 28px;
 }
 
 :deep(.el-tree-node__expand-icon) {
