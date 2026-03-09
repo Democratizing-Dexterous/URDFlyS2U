@@ -1,4 +1,6 @@
-# URDFlyS2U
+# Step2urdf
+
+The repository name has been officially changed from `URDFlyS2U` to `step2urdf`. Please use the new name in future references.
 
 **The ultimate tool for converting STEP files to URDF.**
 
@@ -11,7 +13,7 @@ STEP files are processed entirely on your local machine using your own computati
 
 ## Overview
 
-**URDFlyS2U** provides a new, user‑friendly way to export CAD (STEP) designs to URDF, making robot model creation faster and more accurate.
+**Step2urdf** provides a new, user‑friendly way to export CAD (STEP) designs to URDF, making robot model creation faster and more accurate.
 It combines precise geometric feature extraction with intuitive configuration and real‑time visualization to ensure an efficient and reliable workflow.
 
 <p align="center">
@@ -96,9 +98,9 @@ pnpm lint
 
 Download the release, extract the files, and navigate to the extracted folder. Then run `python -m http.server` and open `127.0.0.1:8000` in your browser.
 
-## Why URDFlyS2U
+## Why Step2urdf
 
-URDFlyS2U streamlines the process of converting detailed mechanical CAD models into robot description formats, offering precision, convenience, and clarity from design to URDF generation.
+Step2urdf streamlines the process of converting detailed mechanical CAD models into robot description formats, offering precision, convenience, and clarity from design to URDF generation.
 
 ## Buy Me a Coffee
 
