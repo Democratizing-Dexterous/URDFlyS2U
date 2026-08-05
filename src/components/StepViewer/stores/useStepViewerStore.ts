@@ -1,317 +1,311 @@
-/**
- * STEP Viewer 状态管理
- */
+import { defineStore } from "pinia";
+import { ref, shallowRef, computed, markRaw } from "vue";
+import * as THREE from "three";
+import type { SolidObject, GeometryFeature, UploadProgress, TreeNode } from "../types";
+import type { LineMeasurementData } from "../core/LineMeasurementTool";
 
-import { defineStore } from 'pinia'
-import { ref, computed, markRaw } from 'vue'
-import type {
-  SolidObject,
-  GeometryFeature,
-  SelectionInfo,
-  UploadProgress,
-  TreeNode,
-} from '../types'
-import type { LineMeasurementData } from '../core/LineMeasurementTool'
+const IDENTITY_MATRIX = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
-export const useStepViewerStore = defineStore('stepViewer', () => {
-  // ============ 状态 ============
-
-  // 上传状态
+export const useStepViewerStore = defineStore("stepViewer", () => {
   const uploadProgress = ref<UploadProgress>({
-    status: 'idle',
+    status: "idle",
     progress: 0,
-    message: ''
-  })
+    message: "",
+  });
 
-  // 模型数据
-  const solids = ref<SolidObject[]>([])
-  const currentFileName = ref<string>('')
+  const solids = shallowRef<SolidObject[]>([]);
+  const solidRevision = ref(0);
+  const focusedSolidId = ref<string | null>(null);
+  const modelRotationElements = ref<number[] | null>(null);
+  const currentFileName = ref<string>("");
 
-  // 结构树状态
-  const treeNodes = ref<TreeNode[]>([])
-  const selectedTreeNodeIds = ref<string[]>([])
-  const expandedTreeNodeIds = ref<string[]>([])
-  const treeNodeCount = ref(0)
+  const treeNodes = ref<TreeNode[]>([]);
+  const selectedTreeNodeIds = ref<string[]>([]);
+  const expandedTreeNodeIds = ref<string[]>([]);
+  const treeNodeCount = ref(0);
 
-  // 侧栏状态
-  const sidePanelVisible = ref(true)
-  const sidePanelWidth = ref(280)
+  const sidePanelVisible = ref(true);
+  const sidePanelWidth = ref(280);
 
-  // 选择状态
-  const selectedFeatures = ref<GeometryFeature[]>([])
+  const selectedFeatures = ref<GeometryFeature[]>([]);
 
-  // 画线测量状态
-  const lineMeasurements = ref<LineMeasurementData[]>([])
-  const isLineMeasureActive = ref(false)
+  const lineMeasurements = ref<LineMeasurementData[]>([]);
+  const isLineMeasureActive = ref(false);
 
-  // 显示设置
-  const showAxes = ref(false)
-  const showGrid = ref(true)
-  const globalOpacity = ref(0.3)
-  const isTransparent = ref(false)
+  const showAxes = ref(false);
+  const showGrid = ref(true);
+  const globalOpacity = ref(0.3);
+  const isTransparent = ref(false);
 
-  // Solid 显隐状态: solidId -> visible
-  const solidVisibilityMap = ref(new Map<string, boolean>())
+  const solidVisibilityMap = ref(new Map<string, boolean>());
 
-  // ============ 计算属性 ============
+  const hasModel = computed(() => solids.value.length > 0);
 
-  // 是否已加载模型
-  const hasModel = computed(() => solids.value.length > 0)
+  const isLoading = computed(
+    () => uploadProgress.value.status === "uploading" || uploadProgress.value.status === "parsing",
+  );
 
-  // 是否正在加载
-  const isLoading = computed(() =>
-    uploadProgress.value.status === 'uploading' ||
-    uploadProgress.value.status === 'parsing'
-  )
+  const firstSelectedFeature = computed(() => selectedFeatures.value[0] || null);
 
-  // 选中的第一个特征
-  const firstSelectedFeature = computed(() => selectedFeatures.value[0] || null)
+  const secondSelectedFeature = computed(() => selectedFeatures.value[1] || null);
 
-  // 选中的第二个特征
-  const secondSelectedFeature = computed(() => selectedFeatures.value[1] || null)
+  const canMeasure = computed(() => selectedFeatures.value.length === 2);
 
-  // 是否可以测量（选中两个特征）
-  const canMeasure = computed(() => selectedFeatures.value.length === 2)
-
-  // 所有特征的类型统计
   const featureStats = computed(() => {
-    const stats: Record<string, number> = {}
-    solids.value.forEach(solid => {
-      solid.features.forEach(feature => {
-        const type = feature.type
-        stats[type] = (stats[type] || 0) + 1
-      })
-    })
-    return stats
-  })
+    const stats: Record<string, number> = {};
+    for (const solid of solids.value) {
+      for (const feature of solid.features) {
+        stats[feature.type] = (stats[feature.type] || 0) + 1;
+      }
+    }
+    return stats;
+  });
 
-  /** 扁平化树节点（用于快速查找） */
-  const flatTreeNodes = computed(() => {
-    const result: TreeNode[] = []
+  const flatTreeNodeMap = computed(() => {
+    const map = new Map<string, TreeNode>();
     const walk = (nodes: TreeNode[]) => {
       for (const node of nodes) {
-        result.push(node)
-        if (node.children) walk(node.children)
+        map.set(node.id, node);
+        if (node.children) walk(node.children);
       }
-    }
-    walk(treeNodes.value)
-    return result
-  })
+    };
+    walk(treeNodes.value);
+    return map;
+  });
 
-  /** 选中节点 ID 的 Set（O(1) 查找） */
-  const selectedTreeNodeIdSet = computed(() => new Set(selectedTreeNodeIds.value))
+  const selectedTreeNodeIdSet = computed(() => new Set(selectedTreeNodeIds.value));
 
-  /** Solid ID → SolidObject 映射（O(1) 查找，修复数组索引查找错位问题） */
   const solidMap = computed(() => {
-    const map = new Map<string, SolidObject>()
-    solids.value.forEach(s => map.set(s.id, s))
-    return map
-  })
+    const map = new Map<string, SolidObject>();
+    for (const s of solids.value) map.set(s.id, s);
+    return map;
+  });
 
-  /** 选中的 Solid 名称列表 */
-  const selectedSolidNames = computed(() => {
-    return selectedTreeNodeIds.value
-      .map(id => flatTreeNodes.value.find(n => n.id === id))
-      .filter(Boolean)
-      .map(n => n!.name)
-  })
+  const solidNameMap = computed(() => {
+    void solidRevision.value;
+    const map = new Map<string, string>();
+    for (const s of solids.value) map.set(s.id, s.name);
+    return map;
+  });
 
-  // ============ 动作 ============
+  const selectedSolidNames = computed(() =>
+    selectedTreeNodeIds.value
+      .map((id) => flatTreeNodeMap.value.get(id)?.name)
+      .filter((name): name is string => !!name),
+  );
 
-  /**
-   * 更新上传进度
-   */
-  function updateUploadProgress(progress: Partial<UploadProgress>): void {
-    uploadProgress.value = { ...uploadProgress.value, ...progress }
+  function solidIdOfIndex(index: number | undefined): string | null {
+    if (index === undefined) return null;
+    const byConvention = `solid_${index}`;
+    if (solidMap.value.has(byConvention)) return byConvention;
+    return solids.value[index]?.id ?? null;
   }
 
-  /**
-   * 设置模型数据
-   * ★ 将大对象 (mesh, serializedData 等) 标记为非响应式，避免 Vue Proxy 包裹导致的性能开销
-   */
-  function setSolids(newSolids: SolidObject[]): void {
-    for (const solid of newSolids) {
-      if (solid.mesh) markRaw(solid.mesh)
-      if (solid.serializedData) markRaw(solid.serializedData as any)
-      if (solid.edgeLines) markRaw(solid.edgeLines)
-      if (solid.topologyEdges) markRaw(solid.topologyEdges)
+  function solidIdOfNode(node: Pick<TreeNode, "id" | "type" | "solidIndex">): string | null {
+    if (node.type !== "solid") return null;
+    if (node.id && solidMap.value.has(node.id)) return node.id;
+    return solidIdOfIndex(node.solidIndex);
+  }
+
+  const treeNodeIdBySolidId = computed(() => {
+    const map = new Map<string, string>();
+    for (const node of flatTreeNodeMap.value.values()) {
+      if (node.type !== "solid") continue;
+      const solidId = solidIdOfNode(node);
+      if (solidId && !map.has(solidId)) map.set(solidId, node.id);
     }
-    solids.value = newSolids
+    return map;
+  });
+
+  function treeNodeIdOfSolid(solidId: string): string {
+    return treeNodeIdBySolidId.value.get(solidId) ?? solidId;
   }
 
-  /**
-   * 设置结构树节点
-   */
+  const selectedSolidIds = computed(() => {
+    const ids: string[] = [];
+    for (const nodeId of new Set(selectedTreeNodeIds.value)) {
+      const node = flatTreeNodeMap.value.get(nodeId);
+      const solidId = node ? solidIdOfNode(node) : solidMap.value.has(nodeId) ? nodeId : null;
+      if (solidId && !ids.includes(solidId)) ids.push(solidId);
+    }
+    return ids;
+  });
+
+  const hasTreeSelection = computed(
+    () => selectedTreeNodeIds.value.length > 0 || !!focusedSolidId.value,
+  );
+
+  function updateUploadProgress(progress: Partial<UploadProgress>): void {
+    uploadProgress.value = { ...uploadProgress.value, ...progress };
+  }
+
+  function setSolids(newSolids: SolidObject[]): void {
+    solids.value = newSolids.map((s) => markRaw(s));
+    focusedSolidId.value = null;
+    solidRevision.value++;
+  }
+
+  function setFocusedSolid(solidId: string | null): void {
+    focusedSolidId.value = solidId;
+  }
+
+  function renameSolid(solidId: string, name: string): boolean {
+    const trimmed = name.trim();
+    const solid = solidMap.value.get(solidId);
+    if (!solid || !trimmed || trimmed === solid.name) return false;
+
+    solid.name = trimmed;
+    if (solid.instanceId === undefined) solid.mesh.name = trimmed;
+    if (solid.serializedData) solid.serializedData.name = trimmed;
+
+    const node = flatTreeNodeMap.value.get(treeNodeIdOfSolid(solidId));
+    if (node) node.name = trimmed;
+    treeNodes.value = [...treeNodes.value];
+    solidRevision.value++;
+    return true;
+  }
+
+  function getModelRotation(): THREE.Matrix4 {
+    const m = new THREE.Matrix4();
+    if (modelRotationElements.value) m.fromArray(modelRotationElements.value);
+    return m;
+  }
+
+  function setModelRotation(m: THREE.Matrix4): void {
+    modelRotationElements.value = m.toArray();
+  }
+
+  const isModelRotated = computed(() => {
+    const e = modelRotationElements.value;
+    if (!e) return false;
+    return e.some((v, i) => Math.abs(v - IDENTITY_MATRIX[i]) > 1e-12);
+  });
+
   function setTreeNodes(nodes: TreeNode[]): void {
-    treeNodes.value = nodes
-    // 默认只展开根层和 Compound 层
-    const idsToExpand: string[] = []
-    let count = 0
+    treeNodes.value = nodes;
+    const idsToExpand: string[] = [];
+    let count = 0;
     const walk = (ns: TreeNode[]) => {
       for (const n of ns) {
-        count++
-        if (n.type === 'root' || n.type === 'compound') {
-          idsToExpand.push(n.id)
+        count++;
+        if (n.type === "root" || n.type === "compound") {
+          idsToExpand.push(n.id);
         }
-        if (n.children) walk(n.children)
+        if (n.children) walk(n.children);
       }
-    }
-    walk(nodes)
-    expandedTreeNodeIds.value = idsToExpand
-    treeNodeCount.value = count
+    };
+    walk(nodes);
+    expandedTreeNodeIds.value = idsToExpand;
+    treeNodeCount.value = count;
   }
 
-  /**
-   * 选中树节点（来自树的交互）
-   */
   function selectTreeNode(nodeId: string, multi = false): void {
     if (multi) {
-      const idx = selectedTreeNodeIds.value.indexOf(nodeId)
+      const idx = selectedTreeNodeIds.value.indexOf(nodeId);
       if (idx >= 0) {
-        selectedTreeNodeIds.value.splice(idx, 1)
+        selectedTreeNodeIds.value.splice(idx, 1);
       } else {
-        selectedTreeNodeIds.value.push(nodeId)
+        selectedTreeNodeIds.value.push(nodeId);
       }
     } else {
-      selectedTreeNodeIds.value = [nodeId]
+      selectedTreeNodeIds.value = [nodeId];
     }
   }
 
-  /**
-   * 从 3D 选中同步到树（3D→树方向）
-   */
   function syncTreeFromSelection(treeNodeIds: string[]): void {
-    selectedTreeNodeIds.value = [...treeNodeIds]
+    selectedTreeNodeIds.value = [...treeNodeIds];
   }
 
-  /**
-   * 清空树选择
-   */
   function clearTreeSelection(): void {
-    selectedTreeNodeIds.value = []
+    selectedTreeNodeIds.value = [];
   }
 
-  /**
-   * 设置当前文件名
-   */
   function setFileName(name: string): void {
-    currentFileName.value = name
+    currentFileName.value = name;
   }
 
-  /**
-   * 清空模型
-   */
   function clearModel(): void {
-    solids.value = []
-    currentFileName.value = ''
-    selectedFeatures.value = []
-    lineMeasurements.value = []
-    isLineMeasureActive.value = false
-    isTransparent.value = false
-    treeNodes.value = []
-    selectedTreeNodeIds.value = []
-    expandedTreeNodeIds.value = []
-    solidVisibilityMap.value = new Map()
+    solids.value = [];
+    focusedSolidId.value = null;
+    modelRotationElements.value = null;
+    currentFileName.value = "";
+    selectedFeatures.value = [];
+    lineMeasurements.value = [];
+    isLineMeasureActive.value = false;
+    isTransparent.value = false;
+    treeNodes.value = [];
+    selectedTreeNodeIds.value = [];
+    expandedTreeNodeIds.value = [];
+    solidVisibilityMap.value = new Map();
     uploadProgress.value = {
-      status: 'idle',
+      status: "idle",
       progress: 0,
-      message: ''
-    }
+      message: "",
+    };
   }
 
-  /**
-   * 设置选中的特征
-   */
   function setSelectedFeatures(features: GeometryFeature[]): void {
-    selectedFeatures.value = features
+    selectedFeatures.value = features;
   }
 
-  /**
-   * 清空选择
-   */
   function clearSelection(): void {
-    selectedFeatures.value = []
-    selectedTreeNodeIds.value = []
+    selectedFeatures.value = [];
+    selectedTreeNodeIds.value = [];
+    focusedSolidId.value = null;
   }
-
-  // ========== 画线测量 ==========
 
   function addLineMeasurement(line: LineMeasurementData): void {
-    lineMeasurements.value.push(line)
+    lineMeasurements.value.push(line);
   }
 
   function removeLineMeasurement(id: string): void {
-    const idx = lineMeasurements.value.findIndex(l => l.id === id)
-    if (idx > -1) lineMeasurements.value.splice(idx, 1)
+    const idx = lineMeasurements.value.findIndex((l) => l.id === id);
+    if (idx > -1) lineMeasurements.value.splice(idx, 1);
   }
 
   function clearLineMeasurements(): void {
-    lineMeasurements.value = []
+    lineMeasurements.value = [];
   }
 
   function setLineMeasureActive(active: boolean): void {
-    isLineMeasureActive.value = active
+    isLineMeasureActive.value = active;
   }
 
-
-  /**
-   * 切换 Solid 显隐状态
-   */
   function toggleSolidVisibility(solidId: string): void {
-    const current = solidVisibilityMap.value.get(solidId) ?? true
-    solidVisibilityMap.value.set(solidId, !current)
-    // 触发响应式更新
-    solidVisibilityMap.value = new Map(solidVisibilityMap.value)
+    const current = solidVisibilityMap.value.get(solidId) ?? true;
+    solidVisibilityMap.value.set(solidId, !current);
+    solidVisibilityMap.value = new Map(solidVisibilityMap.value);
   }
 
-  /**
-   * 获取 Solid 是否可见
-   */
   function isSolidVisible(solidId: string): boolean {
-    return solidVisibilityMap.value.get(solidId) ?? true
+    return solidVisibilityMap.value.get(solidId) ?? true;
   }
 
-  /**
-   * 切换侧栏可见性
-   */
   function toggleSidePanel(): void {
-    sidePanelVisible.value = !sidePanelVisible.value
+    sidePanelVisible.value = !sidePanelVisible.value;
   }
 
-  /**
-   * 设置侧栏宽度
-   */
   function setSidePanelWidth(width: number): void {
-    sidePanelWidth.value = Math.max(120, Math.min(500, width))
+    sidePanelWidth.value = Math.max(120, Math.min(500, width));
   }
 
-  /**
-   * 设置显示设置
-   */
   function setShowAxes(show: boolean): void {
-    showAxes.value = show
+    showAxes.value = show;
   }
 
   function setShowGrid(show: boolean): void {
-    showGrid.value = show
+    showGrid.value = show;
   }
 
-  /**
-   * 设置全局透明度
-   */
   function setGlobalOpacity(opacity: number): void {
-    globalOpacity.value = opacity
+    globalOpacity.value = opacity;
   }
 
-  /**
-   * 设置透明模式
-   */
   function setTransparent(value: boolean): void {
-    isTransparent.value = value
+    isTransparent.value = value;
   }
 
   return {
-    // 状态
     uploadProgress,
     solids,
     currentFileName,
@@ -328,23 +322,34 @@ export const useStepViewerStore = defineStore('stepViewer', () => {
     globalOpacity,
     isTransparent,
     solidVisibilityMap,
+    modelRotationElements,
+    focusedSolidId,
 
-    // 计算属性
     hasModel,
     isLoading,
     firstSelectedFeature,
     secondSelectedFeature,
     canMeasure,
     featureStats,
-    flatTreeNodes,
+    flatTreeNodeMap,
     selectedTreeNodeIdSet,
     selectedSolidNames,
+    selectedSolidIds,
+    hasTreeSelection,
     solidMap,
+    solidNameMap,
     treeNodeCount,
+    isModelRotated,
 
-    // 动作
+    solidIdOfNode,
+    solidIdOfIndex,
+    treeNodeIdOfSolid,
     updateUploadProgress,
     setSolids,
+    setFocusedSolid,
+    renameSolid,
+    getModelRotation,
+    setModelRotation,
     setFileName,
     setTreeNodes,
     selectTreeNode,
@@ -365,5 +370,5 @@ export const useStepViewerStore = defineStore('stepViewer', () => {
     setShowGrid,
     setGlobalOpacity,
     setTransparent,
-  }
-})
+  };
+});

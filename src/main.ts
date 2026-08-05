@@ -1,17 +1,15 @@
-// import "./assets/main.css";
+import "element-plus/dist/index.css";
 import "@/styles/reset.scss";
+import "@/styles/index.css";
+import "@/utils/rem";
+import { Object3D } from "three";
 import { createApp } from "vue";
 import { createPinia } from "pinia";
 import ElementPlus from "element-plus";
-import "@/styles/index.css"
-import "element-plus/dist/index.css";
-import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import zhCn from "element-plus/es/locale/lang/zh-cn";
 import App from "./App.vue";
 import router from "./router";
-import "@/utils/rem";
-const app = createApp(App);
-import "virtual:svg-icons-register";
-app.use(createPinia());
-app.use(router);
-app.use(ElementPlus,{locale: zhCn});
-app.mount("#app");
+
+Object3D.DEFAULT_UP.set(0, 0, 1);
+
+createApp(App).use(createPinia()).use(router).use(ElementPlus, { locale: zhCn }).mount("#app");

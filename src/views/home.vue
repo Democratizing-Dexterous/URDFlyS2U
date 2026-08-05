@@ -5,10 +5,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { StepViewer } from '@/components/StepViewer'
+import { ref } from "vue";
+import { StepViewer } from "@/components/StepViewer";
 
-const viewerRef = ref<InstanceType<typeof StepViewer>>()
+const viewerRef = ref<InstanceType<typeof StepViewer>>();
 </script>
 
 <style lang="scss" scoped>

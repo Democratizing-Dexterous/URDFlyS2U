@@ -1,15 +1,8 @@
-<!--
-  浮动关节控制面板
-  参考 URDFEditor.vue 的拖拽实现
-  支持拖拽移动
--->
-
 <template>
   <Teleport to="body">
     <Transition name="fk-panel">
-      <div v-show="visible" class="fk-floating-panel" :style="panelStyle" @mousedown.stop>
-        <!-- 标题栏（可拖拽） -->
-        <div class="fk-title-bar" @mousedown="startDrag">
+      <div v-show="visible" class="fk-floating-panel" ref="panelRef" @pointerdown="bringToFront">
+        <div class="fk-title-bar" ref="handleRef">
           <span class="fk-title">🎛️ 关节控制</span>
           <div class="fk-title-actions">
             <el-button size="small" text @click.stop="urdfStore.resetJoints()">归零</el-button>
@@ -18,7 +11,6 @@
           </div>
         </div>
 
-        <!-- 关节滑块列表 -->
         <div class="fk-body">
           <div v-if="urdfStore.activeJoints.length > 0" class="slider-list">
             <JointSlider v-for="joint in urdfStore.activeJoints" :key="joint.id" :joint="joint" />
@@ -31,67 +23,41 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { useURDFStore } from '../../stores/useURDFStore'
-import JointSlider from './JointSlider.vue'
+import { toRef } from "vue";
+import { useURDFStore } from "../../stores/useURDFStore";
+import { useFloatingPanel } from "../composables/useFloatingPanel";
+import JointSlider from "./JointSlider.vue";
 
-defineProps<{
-  visible: boolean
-}>()
+const props = defineProps<{
+  visible: boolean;
+}>();
 
 defineEmits<{
-  (e: 'close'): void
-}>()
+  (e: "close"): void;
+}>();
 
-const urdfStore = useURDFStore()
+const urdfStore = useURDFStore();
 
-// 面板位置（居中偏右）
-const posX = ref(Math.max(40, Math.min(window.innerWidth - 360, window.innerWidth * 0.6)))
-const posY = ref(Math.max(40, window.innerHeight - 460))
-
-const panelStyle = computed(() => ({
-  left: `${posX.value}px`,
-  top: `${posY.value}px`,
-}))
-
-function startDrag(e: MouseEvent): void {
-  e.preventDefault()
-  const startX = e.clientX
-  const startY = e.clientY
-  const startPosX = posX.value
-  const startPosY = posY.value
-
-  const onMouseMove = (moveEvent: MouseEvent) => {
-    posX.value = Math.max(0, Math.min(window.innerWidth - 100, startPosX + moveEvent.clientX - startX))
-    posY.value = Math.max(0, Math.min(window.innerHeight - 50, startPosY + moveEvent.clientY - startY))
-  }
-
-  const onMouseUp = () => {
-    document.removeEventListener('mousemove', onMouseMove)
-    document.removeEventListener('mouseup', onMouseUp)
-    document.body.style.cursor = ''
-    document.body.style.userSelect = ''
-  }
-
-  document.body.style.cursor = 'move'
-  document.body.style.userSelect = 'none'
-  document.addEventListener('mousemove', onMouseMove)
-  document.addEventListener('mouseup', onMouseUp)
-}
+const { panelRef, handleRef, bringToFront } = useFloatingPanel({
+  visible: toRef(props, "visible"),
+  initial: ({ width, height }) => ({
+    x: Math.max(40, Math.min(width - 360, width * 0.6)),
+    y: Math.max(40, height - 460),
+  }),
+});
 </script>
 
 <style lang="scss" scoped>
 .fk-floating-panel {
   position: fixed;
-  z-index: 2000;
   width: 320px;
   max-height: 420px;
   display: flex;
   flex-direction: column;
-  background: #fff;
-  border: 1px solid #dcdfe6;
-  border-radius: 8px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  background: var(--panel-face);
+  border: 1px solid var(--panel-edge);
+  border-radius: var(--radius-md);
+  box-shadow: 0 20px 56px rgba(0, 0, 0, 0.38);
   overflow: hidden;
 }
 
@@ -100,17 +66,18 @@ function startDrag(e: MouseEvent): void {
   align-items: center;
   justify-content: space-between;
   padding: 6px 10px;
-  background: #f5f7fa;
-  border-bottom: 1px solid #e4e7ed;
+  background: var(--panel-bar);
+  border-bottom: 1px solid var(--line-strong);
   cursor: move;
   user-select: none;
+  touch-action: none;
   flex-shrink: 0;
 }
 
 .fk-title {
   font-size: 12px;
   font-weight: 600;
-  color: #303133;
+  color: var(--text-1);
 }
 
 .fk-title-actions {
@@ -133,7 +100,7 @@ function startDrag(e: MouseEvent): void {
   }
 
   &::-webkit-scrollbar-thumb {
-    background: #dcdfe6;
+    background: var(--line-strong);
     border-radius: 2px;
   }
 }
@@ -146,17 +113,21 @@ function startDrag(e: MouseEvent): void {
 
 .empty-hint {
   font-size: 12px;
-  color: #909399;
+  color: var(--text-2);
   text-align: center;
   padding: 12px 0;
 }
 
 .fk-panel-enter-active {
-  transition: opacity 0.2s ease, transform 0.2s ease;
+  transition:
+    opacity 0.2s ease,
+    transform 0.2s ease;
 }
 
 .fk-panel-leave-active {
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
 }
 
 .fk-panel-enter-from {

@@ -1,116 +1,153 @@
 <template>
   <div class="link-properties" v-if="link">
-    <!-- 连杆名称 -->
-    <!-- <div class="link-name-row">
-      <el-icon class="link-icon">
-        <Box />
-      </el-icon>
-      <el-input v-if="editingName" v-model="nameInput" autofocus @blur="finishRename" @keydown.enter="finishRename"
-        @keydown.escape="cancelRename" style="flex: 1" />
-      <span v-else class="link-name" @dblclick="startRename">{{ link.name }}</span>
-      <el-tag v-if="urdfStore.isBaseLink(link.id)" type="info">root</el-tag>
-    </div> -->
-
-    <!-- Base Link 坐标基点（仅 root link 显示）-->
     <div v-if="urdfStore.isBaseLink(link.id)" class="base-origin-section">
-      <!-- 标题行：名称 + 状态标签 -->
       <div class="base-origin-header">
         <span class="base-origin-title">🌐 基坐标系原点</span>
         <el-tag :type="urdfStore.baseLinkOrigin ? 'success' : 'warning'" effect="light">
-          {{ urdfStore.baseLinkOrigin ? '已设置' : '未设置' }}
+          {{ urdfStore.baseLinkOrigin ? "已设置" : "未设置" }}
         </el-tag>
       </div>
 
-      <!-- 提示：已绑定 Solid 但未设置基点 -->
-      <el-alert v-if="link.solidIds.length > 0 && !urdfStore.baseLinkOrigin" title="已绑定 Solid，请设置坐标基点以定义运动树计算起点"
-        type="warning" :closable="false" show-icon class="base-origin-alert" />
+      <el-alert
+        v-if="link.solidIds.length > 0 && !urdfStore.baseLinkOrigin"
+        title="已绑定 Solid，请设置坐标基点以定义运动树计算起点"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="base-origin-alert"
+      />
 
-      <!-- XYZ 可编辑输入 -->
       <div class="origin-rows">
         <div class="origin-row" v-for="(ax, idx) in axisConfig" :key="ax.key">
           <span class="origin-axis-lbl" :style="{ color: ax.color }">{{ ax.key }}</span>
-          <el-input-number :model-value="editableOrigin[idx]"
-            @update:model-value="(v: number | undefined) => onAxisInput(idx, v ?? 0)" :precision="4" :step="0.001"
-            controls-position="right" style="flex: 1; min-width: 0" />
+          <el-input-number
+            :model-value="editableOrigin[idx]"
+            @update:model-value="(v: number | undefined) => onAxisInput(idx, v ?? 0)"
+            :precision="4"
+            :step="0.001"
+            controls-position="right"
+            style="flex: 1; min-width: 0"
+          />
         </div>
       </div>
 
-      <!-- 操作按钮 -->
       <div class="origin-actions">
-        <!-- 向上轴选择 -->
-        <div class="up-axis-row">
-          <span class="up-axis-lbl">向上轴</span>
-          <el-radio-group v-model="baseUpAxis">
-            <el-radio-button value="Y+">+Y</el-radio-button>
-            <el-radio-button value="Z+">+Z</el-radio-button>
-            <el-radio-button value="X+">+X</el-radio-button>
-            <el-radio-button value="Y-">-Y</el-radio-button>
-            <el-radio-button value="Z-">-Z</el-radio-button>
-            <el-radio-button value="X-">-X</el-radio-button>
-          </el-radio-group>
-        </div>
-        <!-- 功能按钮行 -->
         <div class="origin-btn-row">
-          <el-tooltip content="根据已绑定 Solid 的包围盒底面中心自动计算" placement="top">
-            <el-button type="primary" plain :disabled="link.solidIds.length === 0" @click="autoCalcOrigin">
-              自动计算
-            </el-button>
-          </el-tooltip>
+          <el-button
+            v-hint="'按 Z-up 约定取已绑定 Solid 包围盒的底面中心（最小 Z）'"
+            type="primary"
+            plain
+            :disabled="link.solidIds.length === 0"
+            @click="autoCalcOrigin"
+          >
+            自动计算
+          </el-button>
           <el-button v-if="urdfStore.baseLinkOrigin" text type="danger" @click="clearBaseOrigin">
             清除
           </el-button>
         </div>
       </div>
-
-      <!-- 基坐标系 RPY 姿态（仅在已设置原点后显示）-->
-      <div v-if="urdfStore.baseLinkOrigin" class="orientation-section">
-        <div class="orient-header">
-          <span class="base-origin-title">基坐标系 RPY（rad）</span>
-          <el-button text @click="resetRPY">重置</el-button>
-        </div>
-        <div class="origin-rows">
-          <div class="origin-row" v-for="(ax, idx) in rpyConfig" :key="ax.key">
-            <span class="origin-axis-lbl" :style="{ color: ax.color }">{{ ax.key }}</span>
-            <el-input-number :model-value="editableRPY[idx]"
-              @update:model-value="(v: number | undefined) => onRPYInput(idx, v ?? 0)" :precision="4" :step="0.01"
-              controls-position="right" style="flex: 1; min-width: 0" />
-          </div>
-        </div>
-      </div>
     </div>
 
     <el-collapse v-model="openPanels">
-      <!-- 绑定 Solid -->
       <el-collapse-item name="solids">
         <template #title>
           <span class="section-title">绑定 Solids（{{ link.solidIds.length }}）</span>
         </template>
         <div class="prop-form">
-          <!-- 已绑定列表 -->
-          <div v-for="solidId in link.solidIds" :key="solidId" class="solid-item">
+          <div
+            v-for="solidId in link.solidIds"
+            :key="solidId"
+            class="solid-item"
+            :class="{ 'is-focused': stepStore.focusedSolidId === solidId }"
+          >
+            <el-checkbox
+              v-if="link.solidIds.length > 1"
+              :model-value="mergeSelection.includes(solidId)"
+              @change="toggleMergeSelection(solidId)"
+            />
             <el-icon>
               <Files />
             </el-icon>
-            <span class="solid-name" :title="getSolidName(solidId)">{{ getSolidName(solidId) }}</span>
-            <el-button text type="danger" :icon="Delete" @click="handleUnbind(solidId)" class="unbind-btn" />
+            <span
+              class="solid-name"
+              :title="`${getSolidName(solidId)}（点击在 3D 中单独高亮）`"
+              @click="toggleFocus(solidId)"
+              >{{ getSolidName(solidId) }}</span
+            >
+            <span v-if="getSolidMass(solidId) !== null" class="solid-mass">
+              {{ getSolidMass(solidId)!.toFixed(3) }} kg
+            </span>
+            <el-tooltip content="重命名 Solid" placement="top" :show-after="500">
+              <el-button
+                text
+                :icon="EditPen"
+                @click="handleRenameSolid(solidId)"
+                class="unbind-btn"
+              />
+            </el-tooltip>
+            <el-tooltip content="按连通面片拆解为多个 Solid" placement="top" :show-after="500">
+              <el-button
+                text
+                type="success"
+                :icon="Scissor"
+                :loading="splitting"
+                @click="handleSplit([solidId])"
+                class="unbind-btn"
+              />
+            </el-tooltip>
+            <el-button
+              text
+              type="danger"
+              :icon="Delete"
+              @click="handleUnbind(solidId)"
+              class="unbind-btn"
+            />
           </div>
 
-          <!-- 绑定新 Solid 按钮 -->
           <div class="bind-actions">
-            <el-button v-if="!urdfStore.bindingMode.active" type="primary" plain :icon="Paperclip"
-              @click="urdfStore.startBindingMode(link.id)">
+            <el-button
+              v-if="!urdfStore.bindingMode.active"
+              type="primary"
+              plain
+              :icon="Paperclip"
+              @click="urdfStore.startBindingMode(link.id)"
+            >
               绑定 Solid
             </el-button>
             <template v-else-if="urdfStore.bindingMode.targetLinkId === link.id">
-              <el-button size="default" type="success" @click="urdfStore.stopBindingMode()"> 完成绑定</el-button>
+              <el-button size="default" type="success" @click="urdfStore.stopBindingMode()">
+                完成绑定</el-button
+              >
             </template>
+            <el-button
+              v-if="link.solidIds.length > 0 && geometryEdit"
+              v-hint="'把该连杆下所有 Solid 按连通面片拆细，用于精确计算质心与惯量'"
+              type="success"
+              plain
+              :icon="Scissor"
+              :loading="splitting"
+              @click="handleSplit(link.solidIds.slice())"
+            >
+              拆解全部
+            </el-button>
+            <el-button
+              v-if="mergeSelection.length >= 2 && geometryEdit"
+              v-hint="'把勾选的 Solid 合并成一个，质量取各自之和，连杆惯量随之重算'"
+              type="warning"
+              plain
+              :icon="Connection"
+              :loading="merging"
+              @click="handleMerge"
+            >
+              合并所选（{{ mergeSelection.length }}）
+            </el-button>
           </div>
 
           <div v-if="link.solidIds.length === 0" class="empty-hint">尚未绑定任何 Solid</div>
         </div>
       </el-collapse-item>
 
-      <!-- 物理属性（默认收起） -->
       <el-collapse-item name="physics">
         <template #title>
           <span class="section-title">物理属性</span>
@@ -121,24 +158,48 @@
               <span class="prop-label">质量</span>
               <span class="prop-value">{{ link.inertial.mass.toFixed(4) }} kg</span>
             </div>
+            <div class="prop-row">
+              <span class="prop-label">质心</span>
+              <span class="prop-value">
+                {{ localInertial!.com.map((v) => v.toFixed(2)).join(", ") }} mm
+              </span>
+            </div>
+            <div class="prop-row">
+              <span class="prop-label" title="惯量主轴姿态，顺序 w, x, y, z">quat</span>
+              <span class="prop-value">
+                {{ formatQuat(localInertial!.inertia) }}
+              </span>
+            </div>
             <div class="inertia-grid">
-              <span class="inertia-title">惯性张量（kg·m²）</span>
+              <span class="inertia-title">惯性张量（kg·m²，连杆系）</span>
               <div class="inertia-row">
-                <span class="inertia-cell">Ixx: {{ link.inertial.inertia[0].toExponential(3) }}</span>
-                <span class="inertia-cell">Ixy: {{ link.inertial.inertia[1].toExponential(3) }}</span>
-                <span class="inertia-cell">Ixz: {{ link.inertial.inertia[2].toExponential(3) }}</span>
+                <span class="inertia-cell"
+                  >Ixx: {{ localInertial!.inertia[0].toExponential(3) }}</span
+                >
+                <span class="inertia-cell"
+                  >Ixy: {{ localInertial!.inertia[1].toExponential(3) }}</span
+                >
+                <span class="inertia-cell"
+                  >Ixz: {{ localInertial!.inertia[2].toExponential(3) }}</span
+                >
               </div>
               <div class="inertia-row">
-                <span class="inertia-cell">Iyy: {{ link.inertial.inertia[3].toExponential(3) }}</span>
-                <span class="inertia-cell">Iyz: {{ link.inertial.inertia[4].toExponential(3) }}</span>
-                <span class="inertia-cell">Izz: {{ link.inertial.inertia[5].toExponential(3) }}</span>
+                <span class="inertia-cell"
+                  >Iyy: {{ localInertial!.inertia[3].toExponential(3) }}</span
+                >
+                <span class="inertia-cell"
+                  >Iyz: {{ localInertial!.inertia[4].toExponential(3) }}</span
+                >
+                <span class="inertia-cell"
+                  >Izz: {{ localInertial!.inertia[5].toExponential(3) }}</span
+                >
               </div>
             </div>
+            <p class="frame-hint">质心 / quat / 张量均为该连杆自身坐标系下的值，与导出结果一致</p>
           </template>
           <div v-else class="empty-hint">请使用左侧「整机惯量计算」功能统一计算</div>
         </div>
       </el-collapse-item>
-
     </el-collapse>
   </div>
 
@@ -146,156 +207,208 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Box, Files, Delete, Paperclip } from '@element-plus/icons-vue'
-import { useURDFStore } from '../../stores/useURDFStore'
-import { useStepViewerStore } from '../../stores/useStepViewerStore'
+import { ref, computed, watch } from "vue";
+import { isDialogDismissed, promptDialog } from "../../utils/dialog";
+import { vHint } from "../composables/useHintBar";
+import { ElMessage } from "element-plus";
+import Files from "~icons/ep/files";
+import Delete from "~icons/ep/delete";
+import Paperclip from "~icons/ep/paperclip";
+import Scissor from "~icons/ep/scissor";
+import Connection from "~icons/ep/connection";
+import EditPen from "~icons/ep/edit-pen";
+import { useURDFStore } from "../../stores/useURDFStore";
+import { useStepViewerStore } from "../../stores/useStepViewerStore";
+import { useGeometryEditApi } from "../composables/useGeometryEdit";
+import { principalAxisQuat } from "../../core/useInertiaWorker";
+import { buildLinkRestInverses, toLinkLocalInertial } from "../../core/InertiaFrame";
+import type { InertialParams } from "../../types";
 
-const urdfStore = useURDFStore()
-const stepStore = useStepViewerStore()
+function formatQuat(inertia: InertialParams["inertia"]): string {
+  const [x, y, z, w] = principalAxisQuat(inertia);
+  return [w, x, y, z].map((v) => v.toFixed(4)).join(", ");
+}
 
-const openPanels = ref<string[]>(['solids', 'physics']) // 默认展开的面板
+const urdfStore = useURDFStore();
+const stepStore = useStepViewerStore();
+const geometryEdit = useGeometryEditApi();
+const splitting = ref(false);
+const merging = ref(false);
+const mergeSelection = ref<string[]>([]);
+
+function toggleMergeSelection(solidId: string): void {
+  const i = mergeSelection.value.indexOf(solidId);
+  if (i >= 0) mergeSelection.value.splice(i, 1);
+  else mergeSelection.value.push(solidId);
+}
+
+async function handleMerge(): Promise<void> {
+  if (!geometryEdit || merging.value) return;
+  const ids = mergeSelection.value.slice();
+  if (ids.length < 2) return;
+
+  merging.value = true;
+  try {
+    const result = await geometryEdit.mergeSolids(ids);
+    mergeSelection.value = [];
+    const mass = link.value?.solidMasses?.[result.solidId];
+    const massHint = typeof mass === "number" ? `，合并后质量 ${mass.toFixed(4)} kg` : "";
+    ElMessage.success(`已把 ${result.merged} 个 Solid 合并为「${result.name}」${massHint}`);
+  } catch (error) {
+    ElMessage.error(`合并失败: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    merging.value = false;
+  }
+}
+
+async function handleSplit(solidIds: string[]): Promise<void> {
+  if (!geometryEdit || solidIds.length === 0 || splitting.value) return;
+  splitting.value = true;
+  try {
+    const results = await geometryEdit.splitSolids(solidIds);
+    const total = results.reduce((sum, r) => sum + Math.max(r.parts, 1), 0);
+    if (total <= solidIds.length) {
+      ElMessage.info("这些实体是单一连通体，无需拆解");
+      return;
+    }
+    mergeSelection.value = [];
+    const inertial = link.value?.inertial;
+    const hint = inertial ? `，质量 ${inertial.mass.toFixed(4)} kg 保持不变，质心与惯量已重算` : "";
+    ElMessage.success(`已拆解为 ${total} 个细 Solid${hint}`);
+  } catch (error) {
+    ElMessage.error(`拆解失败: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    splitting.value = false;
+  }
+}
+
+const openPanels = ref<string[]>(["solids", "physics"]);
 
 const link = computed(() => {
-  if (!urdfStore.selectedLinkId) return null
-  return urdfStore.linkMap.get(urdfStore.selectedLinkId) ?? null
-})
+  if (!urdfStore.selectedLinkId) return null;
+  return urdfStore.linkMap.get(urdfStore.selectedLinkId) ?? null;
+});
 
-// ——— 重命名 ———
-const editingName = ref(false)
-const nameInput = ref('')
+const localInertial = computed<InertialParams | null>(() => {
+  const current = link.value;
+  if (!current?.inertial) return null;
+  const restInverse = buildLinkRestInverses(urdfStore.robot, {
+    baseLinkId: urdfStore.BASE_LINK_ID,
+    baseLinkOrigin: urdfStore.baseLinkOrigin,
+    baseLinkRPY: urdfStore.baseLinkRPY,
+  }).get(current.id);
+  return toLinkLocalInertial(current.inertial, restInverse);
+});
 
-function startRename(): void {
-  nameInput.value = link.value?.name ?? ''
-  editingName.value = true
-}
+watch(
+  () => urdfStore.selectedLinkId,
+  () => {
+    mergeSelection.value = [];
+  },
+);
 
-function finishRename(): void {
-  if (link.value && nameInput.value.trim()) {
-    urdfStore.renameLink(link.value.id, nameInput.value.trim())
-  }
-  editingName.value = false
-}
-
-function cancelRename(): void {
-  editingName.value = false
-}
-
-// ——— Solid 操作 ———
 function handleUnbind(solidId: string): void {
-  if (link.value) urdfStore.unbindSolid(link.value.id, solidId)
+  if (link.value) urdfStore.unbindSolid(link.value.id, solidId);
 }
 
 function getSolidName(solidId: string): string {
-  return stepStore.solidMap.get(solidId)?.name ?? solidId
+  return stepStore.solidNameMap.get(solidId) ?? solidId;
 }
 
-// ——— Base Origin ———
+function toggleFocus(solidId: string): void {
+  stepStore.setFocusedSolid(stepStore.focusedSolidId === solidId ? null : solidId);
+}
+
+async function handleRenameSolid(solidId: string): Promise<void> {
+  try {
+    const { value } = await promptDialog("输入新的 Solid 名称", "重命名 Solid", {
+      confirmButtonText: "确定",
+      cancelButtonText: "取消",
+      inputValue: getSolidName(solidId),
+      inputValidator: (v: string) => (v && v.trim().length > 0 ? true : "名称不能为空"),
+    });
+    if (geometryEdit?.renameSolid(solidId, value) ?? stepStore.renameSolid(solidId, value)) {
+      ElMessage.success(`已重命名为「${value.trim()}」`);
+    } else {
+      ElMessage.info("名称未变化");
+    }
+  } catch (error) {
+    if (!isDialogDismissed(error)) {
+      ElMessage.error(`重命名失败：${(error as Error)?.message ?? error}`);
+    }
+  }
+}
+
+function getSolidMass(solidId: string): number | null {
+  const m = link.value?.solidMasses?.[solidId];
+  return typeof m === "number" && m > 0 ? m : null;
+}
+
 const axisConfig = [
-  { key: 'X', color: '#f56c6c' },
-  { key: 'Y', color: '#67c23a' },
-  { key: 'Z', color: '#409eff' }
-]
+  { key: "X", color: "#f56c6c" },
+  { key: "Y", color: "#67c23a" },
+  { key: "Z", color: "#409eff" },
+];
 
-/** RPY 输入标签：R=roll绕X, P=pitch绕Y, Y=yaw绕Z */
-const rpyConfig = [
-  { key: 'R', color: '#f56c6c' },
-  { key: 'P', color: '#67c23a' },
-  { key: 'Y', color: '#409eff' }
-]
-
-/** 底面运动方向（即哪个轴指向上），自动计算时利用这个轴的最小导 OR 最大导作为底面 */
-const baseUpAxis = ref<'Y+' | 'Y-' | 'Z+' | 'Z-' | 'X+' | 'X-'>('Y+')
-
-const editableOrigin = ref<[number, number, number]>([0, 0, 0])
-const editableRPY = ref<[number, number, number]>([0, 0, 0])
+const editableOrigin = ref<[number, number, number]>([0, 0, 0]);
 
 watch(
   () => urdfStore.baseLinkOrigin,
-  (v) => { editableOrigin.value = v ? [...v] as [number, number, number] : [0, 0, 0] },
-  { immediate: true, deep: true }
-)
-
-watch(
-  () => urdfStore.baseLinkRPY,
-  (v) => { editableRPY.value = v ? [...v] as [number, number, number] : [0, 0, 0] },
-  { immediate: true, deep: true }
-)
+  (v) => {
+    editableOrigin.value = v ? ([...v] as [number, number, number]) : [0, 0, 0];
+  },
+  { immediate: true, deep: true },
+);
 
 function onAxisInput(idx: number, val: number): void {
-  const o: [number, number, number] = [...editableOrigin.value] as [number, number, number]
-  o[idx] = val
-  editableOrigin.value = o
-  urdfStore.baseLinkOrigin = [...o] as [number, number, number]
-}
-
-function onRPYInput(idx: number, val: number): void {
-  const d: [number, number, number] = [...editableRPY.value] as [number, number, number]
-  d[idx] = val
-  editableRPY.value = d
-  urdfStore.baseLinkRPY = [...d] as [number, number, number]
-}
-
-function resetRPY(): void {
-  urdfStore.baseLinkRPY = [0, 0, 0]
+  const o: [number, number, number] = [...editableOrigin.value] as [number, number, number];
+  o[idx] = val;
+  editableOrigin.value = o;
+  urdfStore.baseLinkOrigin = [...o] as [number, number, number];
 }
 
 function clearBaseOrigin(): void {
-  urdfStore.baseLinkOrigin = null
-  urdfStore.baseLinkRPY = null
+  urdfStore.baseLinkOrigin = null;
+  urdfStore.baseLinkRPY = null;
 }
 
-/** 根据已绑定 Solid 的包围盒自动计算底面中心作为基点
- *  底面 = baseUpAxis 方向的最小/最大截面中心 */
 function autoCalcOrigin(): void {
-  if (!link.value || link.value.solidIds.length === 0) return
-  let xMin = Infinity, yMin = Infinity, zMin = Infinity
-  let xMax = -Infinity, yMax = -Infinity, zMax = -Infinity
-  let found = false
+  if (!link.value || link.value.solidIds.length === 0) return;
+  let xMin = Infinity,
+    yMin = Infinity,
+    zMin = Infinity;
+  let xMax = -Infinity,
+    yMax = -Infinity,
+    zMax = -Infinity;
+  let found = false;
   for (const sid of link.value.solidIds) {
-    const pos = stepStore.solidMap.get(sid)?.serializedData?.positions
-    if (!pos) continue
-    found = true
+    const pos = stepStore.solidMap.get(sid)?.serializedData?.positions;
+    if (!pos) continue;
+    found = true;
     for (let i = 0; i < pos.length; i += 3) {
-      if (pos[i] < xMin) xMin = pos[i]; if (pos[i] > xMax) xMax = pos[i]
-      if (pos[i + 1] < yMin) yMin = pos[i + 1]; if (pos[i + 1] > yMax) yMax = pos[i + 1]
-      if (pos[i + 2] < zMin) zMin = pos[i + 2]; if (pos[i + 2] > zMax) zMax = pos[i + 2]
+      if (pos[i] < xMin) xMin = pos[i];
+      if (pos[i] > xMax) xMax = pos[i];
+      if (pos[i + 1] < yMin) yMin = pos[i + 1];
+      if (pos[i + 1] > yMax) yMax = pos[i + 1];
+      if (pos[i + 2] < zMin) zMin = pos[i + 2];
+      if (pos[i + 2] > zMax) zMax = pos[i + 2];
     }
   }
-  if (!found) { ElMessage.warning('未找到有效几何数据'); return }
-  const round = (v: number) => Math.round(v * 10000) / 10000
-  const cx = (xMin + xMax) / 2, cy = (yMin + yMax) / 2, cz = (zMin + zMax) / 2
-  let ox: number, oy: number, oz: number
-  switch (baseUpAxis.value) {
-    case 'Y+': ox = cx; oy = yMin; oz = cz; break
-    case 'Y-': ox = cx; oy = yMax; oz = cz; break
-    case 'Z+': ox = cx; oy = cy; oz = zMin; break
-    case 'Z-': ox = cx; oy = cy; oz = zMax; break
-    case 'X+': ox = xMin; oy = cy; oz = cz; break
-    case 'X-': ox = xMax; oy = cy; oz = cz; break
-    default: ox = cx; oy = yMin; oz = cz; break
+  if (!found) {
+    ElMessage.warning("未找到有效几何数据");
+    return;
   }
-  urdfStore.baseLinkOrigin = [round(ox), round(oy), round(oz)]
+  const round = (v: number) => Math.round(v * 10000) / 10000;
+  const cx = (xMin + xMax) / 2,
+    cy = (yMin + yMax) / 2;
+  const ox = cx,
+    oy = cy,
+    oz = zMin;
+  urdfStore.baseLinkOrigin = [round(ox), round(oy), round(oz)];
 
-  // 根据向上轴设置基坐标系 RPY 姿态（ZYX 顺序，与 URDF rpy 约定一致）
-  // 数学验证：R = Rz(yaw)·Ry(pitch)·Rx(roll)·[0,0,1]
-  // Z+: identity → [0,0,0]  Z-: Ry(π) → [0,π,0]
-  // Y+: Rx(-π/2) → [-π/2,0,0]  Y-: Rx(π/2) → [π/2,0,0]
-  // X+: Ry(π/2) → [0,π/2,0]   X-: Ry(-π/2) → [0,-π/2,0]
-  const rpyMap: Record<string, [number, number, number]> = {
-    'Z+': [0, 0, 0],
-    'Z-': [0, Math.PI, 0],
-    'Y+': [-Math.PI / 2, 0, 0],
-    'Y-': [Math.PI / 2, 0, 0],
-    'X+': [0, Math.PI / 2, 0],
-    'X-': [0, -Math.PI / 2, 0]
-  }
-  urdfStore.baseLinkRPY = rpyMap[baseUpAxis.value] ?? [0, 0, 0]
-  ElMessage.success(`已自动设置基点（${baseUpAxis.value} 底面中心）`)
+  urdfStore.baseLinkRPY = [0, 0, 0];
+  ElMessage.success("已自动设置基点（包围盒底面中心）");
 }
-
-// ——— 惯性计算已移至 ViewControls.vue 整机惯量对话框 ———
 </script>
 
 <style lang="scss" scoped>
@@ -313,7 +426,7 @@ function autoCalcOrigin(): void {
   margin-bottom: 8px;
 
   .link-icon {
-    color: #409eff;
+    color: var(--accent);
     font-size: 14px;
     flex-shrink: 0;
   }
@@ -329,12 +442,11 @@ function autoCalcOrigin(): void {
     white-space: nowrap;
 
     &:hover {
-      color: #409eff;
+      color: var(--accent);
     }
   }
 }
 
-/* Collapse */
 :deep(.el-collapse) {
   border: none;
 
@@ -372,24 +484,35 @@ function autoCalcOrigin(): void {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 
   .prop-label {
     font-size: 11px;
     color: #606266;
     width: 36px;
     flex-shrink: 0;
+    white-space: nowrap;
   }
 
   .prop-value {
     font-size: 12px;
     color: #303133;
     font-family: monospace;
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
   }
 
   .prop-unit {
     font-size: 10px;
-    color: #909399;
+    color: var(--text-2);
   }
+}
+
+.frame-hint {
+  margin: 4px 0 0;
+  font-size: 10px;
+  color: var(--text-2);
 }
 
 .solid-item {
@@ -402,7 +525,7 @@ function autoCalcOrigin(): void {
   border: 1px solid #ebeef5;
 
   .el-icon {
-    color: #909399;
+    color: var(--text-2);
     font-size: 12px;
     flex-shrink: 0;
   }
@@ -414,6 +537,17 @@ function autoCalcOrigin(): void {
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
+    cursor: pointer;
+  }
+
+  &.is-focused {
+    background: var(--el-color-primary-light-9);
+    border-color: var(--accent);
+
+    .solid-name {
+      color: var(--accent);
+      font-weight: 600;
+    }
   }
 
   .unbind-btn {
@@ -421,6 +555,13 @@ function autoCalcOrigin(): void {
     height: 18px !important;
     width: 18px !important;
     min-height: unset !important;
+    flex-shrink: 0;
+  }
+
+  .solid-mass {
+    font-size: 10px;
+    color: #67c23a;
+    font-family: monospace;
     flex-shrink: 0;
   }
 }
@@ -435,7 +576,7 @@ function autoCalcOrigin(): void {
 .inertia-grid {
   .inertia-title {
     font-size: 10px;
-    color: #909399;
+    color: var(--text-2);
     display: block;
     margin-bottom: 4px;
   }
@@ -459,12 +600,11 @@ function autoCalcOrigin(): void {
 
 .empty-hint {
   font-size: 11px;
-  color: #c0c4cc;
+  color: var(--text-3);
   text-align: center;
   padding: 8px 0;
 }
 
-/* Base Origin 区域 */
 .base-origin-section {
   margin-bottom: 8px;
   padding: 6px 8px 8px;
@@ -524,34 +664,11 @@ function autoCalcOrigin(): void {
   gap: 5px;
 }
 
-.up-axis-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.up-axis-lbl {
-  font-size: 16px;
-  color: #606266;
-  flex-shrink: 0;
-}
-
-:deep(.up-axis-row .el-radio-button__inner) {
-  padding: 2px 6px;
-  font-size: 16px;
-}
-
 .origin-btn-row {
   display: flex;
   align-items: center;
   gap: 4px;
   flex-wrap: wrap;
-}
-
-.orientation-section {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dashed #b3d8f5;
 }
 
 .orient-header {

@@ -1,918 +1,626 @@
-/**
- * STEP 文件解析 Web Worker
- * 使用 opencascade.js (XDE) 在独立线程中执行 STEP 解析
- *
- * 功能：
- * - STEPCAFControl_Reader 读取（保留颜色/名称/装配体结构）
- * - TopExp_Explorer 遍历拓扑（Compound → Solid → Face）
- * - BRepAdaptor_Surface 精确识别面类型和几何属性
- * - BRepMesh_IncrementalMesh 三角化
- * - BRep_Tool.Triangulation 提取网格数据
- * - Transferable 零拷贝传输
- */
-
+import * as Comlink from "comlink";
+import { OcctKernel, type ShapeHandle } from "occt-wasm";
+import occtWasmUrl from "occt-wasm/dist/occt-wasm.wasm?url";
+import { HASH_UPPER_BOUND, extractFaceGeometry, extractEdgeGeometry } from "./OcctGeometry";
 import type {
   WorkerRequest,
   WorkerResponse,
   SerializedSolidData,
   SerializedTreeNode,
+  SolidMassProps,
   FaceGroupInfo,
   FaceGeometryData,
   EdgeGroupInfo,
-  EdgeGeometryData
-} from '../types'
+  EdgeGeometryData,
+} from "../types";
 
-// OpenCascade 实例
-let oc: any = null
+const DEFLECTION_RATIO = 5e-4;
+const DEFLECTION_MIN = 0.02;
+const DEFLECTION_MAX = 1.0;
+const ANGULAR_DEFLECTION = 0.5;
+const MM5_TO_M5 = 1e-15;
+const DEGENERATE_LENGTH = 1e-9;
 
-/**
- * 向主线程发送消息（类型安全）
- */
+let kernel: OcctKernel | null = null;
+let progressCb: ProgressCallback | null = null;
+
+export type ProgressCallback = (stage: string, percent: number) => void;
+
 function post(msg: WorkerResponse, transfer?: Transferable[]): void {
+  if (msg.type === "progress" && progressCb) {
+    try {
+      progressCb(msg.stage, msg.percent);
+    } catch {}
+  }
   if (transfer && transfer.length > 0) {
-    ; (self as unknown as Worker).postMessage(msg, transfer)
+    (self as unknown as Worker).postMessage(msg, transfer);
   } else {
-    self.postMessage(msg)
+    self.postMessage(msg);
   }
 }
 
-/**
- * 初始化 opencascade.js WASM（Worker 内单例）
- */
-async function initOC(): Promise<any> {
-  if (oc) return oc
+async function initKernel(): Promise<OcctKernel> {
+  if (kernel) return kernel;
 
-  post({ type: 'progress', stage: '正在加载 OpenCascade WASM 引擎...', percent: 5 })
+  post({ type: "progress", stage: "正在加载 OpenCascade WASM 引擎...", percent: 5 });
 
   try {
-    const initOpenCascade = (await import('opencascade.js')).default
-    oc = await initOpenCascade()
-    return oc
+    kernel = await OcctKernel.init({ wasm: occtWasmUrl });
+    return kernel;
   } catch (error) {
-    throw new Error(`OpenCascade WASM 初始化失败: ${error instanceof Error ? error.message : String(error)}`)
+    throw new Error(
+      `OpenCascade WASM 初始化失败: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
-/**
- * GC 包装器 — 管理 OCCT 对象内存
- */
-function withGC<T>(fn: (register: <O>(obj: O) => O) => T): T {
-  const toDelete: any[] = []
-  const register = <O>(obj: O): O => {
-    toDelete.push(obj)
-    return obj
-  }
+function computeDeflection(k: OcctKernel, shape: ShapeHandle): number {
   try {
-    return fn(register)
-  } finally {
-    for (const obj of toDelete) {
-      try {
-        if (obj && typeof obj.delete === 'function') obj.delete()
-      } catch { /* ignore */ }
-    }
+    const box = k.getBoundingBox(shape, false);
+    const diag = Math.hypot(box.xmax - box.xmin, box.ymax - box.ymin, box.zmax - box.zmin);
+    if (!isFinite(diag) || diag <= 0) return DEFLECTION_MIN;
+    return Math.min(Math.max(diag * DEFLECTION_RATIO, DEFLECTION_MIN), DEFLECTION_MAX);
+  } catch {
+    return DEFLECTION_MIN;
   }
 }
 
-/**
- * 读取 STEP 文件，返回合并后的 TopoDS_Shape
- */
-function readStepFile(fileBuffer: ArrayBuffer): any {
-  return withGC((r) => {
-    const fileName = 'model.step'
+function isPhysicallyValidInertia(
+  ixx: number,
+  ixy: number,
+  ixz: number,
+  iyy: number,
+  iyz: number,
+  izz: number,
+): boolean {
+  if (![ixx, ixy, ixz, iyy, iyz, izz].every(isFinite)) return false;
+  if (ixx <= 0 || iyy <= 0 || izz <= 0) return false;
 
-    // 写入 Emscripten 虚拟文件系统
-    oc.FS.createDataFile('/', fileName, new Uint8Array(fileBuffer), true, true, true)
+  const scale = Math.max(ixx, iyy, izz);
+  const slack = scale * 1e-6;
+  if (ixx + iyy < izz - slack) return false;
+  if (iyy + izz < ixx - slack) return false;
+  if (izz + ixx < iyy - slack) return false;
 
-    post({ type: 'progress', stage: '正在读取 STEP 文件...', percent: 15 })
+  const det =
+    ixx * (iyy * izz - iyz * iyz) - ixy * (ixy * izz - iyz * ixz) + ixz * (ixy * iyz - iyy * ixz);
+  if (!(det > 0)) return false;
+  if (ixx * iyy - ixy * ixy <= 0) return false;
 
-    // 使用 STEPControl_Reader（简单可靠）
-    const reader = r(new oc.STEPControl_Reader_1())
-    const readResult = reader.ReadFile(fileName)
-
-    // 清理虚拟文件
-    try { oc.FS.unlink(`/${fileName}`) } catch { /* ignore */ }
-
-    if (readResult !== oc.IFSelect_ReturnStatus.IFSelect_RetDone) {
-      throw new Error('STEP 文件读取失败，请检查文件是否损坏')
-    }
-
-    post({ type: 'progress', stage: '正在转换模型数据...', percent: 25 })
-
-    // 转换所有根实体
-    reader.TransferRoots(r(new oc.Message_ProgressRange_1()))
-
-    // 获取合并后的形状（不注册到 GC，由调用方管理）
-    const shape = reader.OneShape()
-    return shape
-  })
+  return true;
 }
 
-/**
- * 提取面的几何信息（使用 BRepAdaptor_Surface）
- */
-function extractFaceGeometry(face: any): FaceGeometryData {
-  return withGC((r) => {
-    const adaptor = r(new oc.BRepAdaptor_Surface_2(face, false))
-    const surfType = adaptor.GetType()
-    const ga = oc.GeomAbs_SurfaceType
+function computeMassProps(k: OcctKernel, solid: ShapeHandle): SolidMassProps | undefined {
+  try {
+    const volume = k.getVolume(solid);
+    if (!isFinite(volume) || volume <= 0) return undefined;
 
-    const result: FaceGeometryData = { type: 'face' }
+    const com = k.getCenterOfMass(solid);
+    if (!isFinite(com.x) || !isFinite(com.y) || !isFinite(com.z)) return undefined;
 
-    try {
-      if (surfType === ga.GeomAbs_Plane) {
-        result.type = 'plane'
-        const plane = adaptor.Plane()
-        const loc = plane.Location()
-        const dir = plane.Axis().Direction()
-        result.center = [loc.X(), loc.Y(), loc.Z()]
-        result.normal = [dir.X(), dir.Y(), dir.Z()]
-      } else if (surfType === ga.GeomAbs_Cylinder) {
-        const cyl = adaptor.Cylinder()
-        const ax = cyl.Axis()
-        const loc = ax.Location()
-        const dir = ax.Direction()
-        result.center = [loc.X(), loc.Y(), loc.Z()]
-        result.axis = [dir.X(), dir.Y(), dir.Z()]
-        result.normal = [dir.X(), dir.Y(), dir.Z()]
-        result.radius = cyl.Radius()
+    const m = k.getInertia(solid);
+    if (!m || m.length < 9) return undefined;
 
-        // UV 参数域
-        const uMin = adaptor.FirstUParameter()
-        const uMax = adaptor.LastUParameter()
-        const vMin = adaptor.FirstVParameter()
-        const vMax = adaptor.LastVParameter()
-        result.uBounds = [uMin, uMax]
-        result.vBounds = [vMin, vMax]
-        result.startAngle = uMin
-        result.endAngle = uMax
-
-        // 计算高度
-        if (isFinite(vMin) && isFinite(vMax)) {
-          result.height = Math.abs(vMax - vMin)
-        }
-
-        // 判断是否是完整圆柱还是圆弧柱
-        if (Math.abs(uMax - uMin) < Math.PI * 1.99) {
-          result.type = 'arc'
-        } else {
-          result.type = 'cylinder'
-        }
-      } else if (surfType === ga.GeomAbs_Cone) {
-        result.type = 'cone'
-        const cone = adaptor.Cone()
-        const apex = cone.Apex()
-        const ax = cone.Axis()
-        const dir = ax.Direction()
-        result.center = [apex.X(), apex.Y(), apex.Z()]
-        result.axis = [dir.X(), dir.Y(), dir.Z()]
-        result.normal = [dir.X(), dir.Y(), dir.Z()]
-        result.semiAngle = cone.SemiAngle()
-        result.radius = cone.RefRadius()
-      } else if (surfType === ga.GeomAbs_Sphere) {
-        result.type = 'sphere'
-        const sphere = adaptor.Sphere()
-        const center = sphere.Location()
-        result.center = [center.X(), center.Y(), center.Z()]
-        result.radius = sphere.Radius()
-      } else if (surfType === ga.GeomAbs_Torus) {
-        result.type = 'torus'
-        const torus = adaptor.Torus()
-        const center = torus.Location()
-        const dir = torus.Axis().Direction()
-        result.center = [center.X(), center.Y(), center.Z()]
-        result.axis = [dir.X(), dir.Y(), dir.Z()]
-        result.normal = [dir.X(), dir.Y(), dir.Z()]
-        result.majorRadius = torus.MajorRadius()
-        result.minorRadius = torus.MinorRadius()
-        result.radius = torus.MajorRadius()
-      } else {
-        // BezierSurface, BSplineSurface, 等 — 只提取 UV 域
-        result.type = 'face'
-      }
-    } catch {
-      // 几何提取失败时用默认值
-      result.type = 'face'
-    }
-
-    return result
-  })
-}
-
-/**
- * 提取圆形面检测（对 PLANE 类型面，检查是否为圆形轮廓）
- */
-function checkCircularPlaneFace(face: any, positions: Float32Array, startVertex: number, vertexCount: number): FaceGeometryData | null {
-  if (vertexCount < 6) return null
-
-  // 计算中心
-  let cx = 0, cy = 0, cz = 0
-  for (let i = 0; i < vertexCount; i++) {
-    const vi = (startVertex + i) * 3
-    cx += positions[vi]
-    cy += positions[vi + 1]
-    cz += positions[vi + 2]
-  }
-  cx /= vertexCount
-  cy /= vertexCount
-  cz /= vertexCount
-
-  // 计算到中心的距离
-  let sumDist = 0
-  const distances: number[] = []
-  for (let i = 0; i < vertexCount; i++) {
-    const vi = (startVertex + i) * 3
-    const dx = positions[vi] - cx
-    const dy = positions[vi + 1] - cy
-    const dz = positions[vi + 2] - cz
-    const d = Math.sqrt(dx * dx + dy * dy + dz * dz)
-    distances.push(d)
-    sumDist += d
-  }
-  const avgDist = sumDist / vertexCount
-  if (avgDist < 0.001) return null
-
-  // 10% 容差检查
-  const tolerance = avgDist * 0.1
-  const isCircular = distances.every(d => Math.abs(d - avgDist) < tolerance)
-  if (!isCircular) return null
-
-  return {
-    type: 'circle',
-    center: [cx, cy, cz],
-    radius: avgDist
-  }
-}
-
-/**
- * 从单个 Face 提取三角化数据
- */
-function extractFaceTriangulation(face: any, globalVertexOffset: number): {
-  positions: number[]
-  normals: number[]
-  indices: number[]
-  vertexCount: number
-} | null {
-  return withGC((r) => {
-    const location = r(new oc.TopLoc_Location_1())
-    const triangulationHandle = oc.BRep_Tool.Triangulation(face, location, 0)
-
-    if (triangulationHandle.IsNull()) return null
-
-    const tri = triangulationHandle.get()
-    const transformation = location.Transformation()
-    const nbNodes = tri.NbNodes()
-    const nbTriangles = tri.NbTriangles()
-
-    if (nbNodes === 0 || nbTriangles === 0) return null
-
-    const positions: number[] = []
-    const normals: number[] = []
-
-    // 提取顶点位置
-    for (let i = 1; i <= nbNodes; i++) {
-      const node = tri.Node(i)
-      const p = node.Transformed(transformation)
-      positions.push(p.X(), p.Y(), p.Z())
-    }
-
-    // 提取法线
-    const hasNormals = tri.HasNormals()
-    if (hasNormals) {
-      for (let i = 1; i <= nbNodes; i++) {
-        try {
-          const normal = tri.Normal(i)
-          normals.push(normal.X(), normal.Y(), normal.Z())
-        } catch {
-          normals.push(0, 1, 0) // fallback
-        }
-      }
-    } else {
-      // 填充零法线，后续在 Three.js 中 computeVertexNormals
-      for (let i = 0; i < nbNodes; i++) {
-        normals.push(0, 0, 0)
-      }
-    }
-
-    // 提取三角形索引并处理面朝向
-    const orient = face.Orientation_1()
-    const isReversed = (orient === oc.TopAbs_Orientation.TopAbs_REVERSED)
-    const indices: number[] = []
-
-    for (let i = 1; i <= nbTriangles; i++) {
-      const triangle = tri.Triangle(i)
-      let n1 = triangle.Value(1)
-      let n2 = triangle.Value(2)
-      const n3 = triangle.Value(3)
-
-      // 反面翻转绕序
-      if (isReversed) {
-        const tmp = n1
-        n1 = n2
-        n2 = tmp
-      }
-
-      // OCCT 索引 1-based → 0-based + 全局偏移
-      indices.push(
-        n1 - 1 + globalVertexOffset,
-        n2 - 1 + globalVertexOffset,
-        n3 - 1 + globalVertexOffset
-      )
-    }
-
-    // 如果反面，也翻转法线
-    if (isReversed && hasNormals) {
-      for (let i = 0; i < normals.length; i++) {
-        normals[i] = -normals[i]
-      }
-    }
-
-    return { positions, normals, indices, vertexCount: nbNodes }
-  })
-}
-
-/**
- * 提取单条边的几何信息（使用 BRepAdaptor_Curve）
- */
-function extractEdgeGeometry(edge: any): EdgeGeometryData {
-  return withGC((r) => {
-    const adaptor = r(new oc.BRepAdaptor_Curve_2(edge))
-    const curveTypeEnum = adaptor.GetType()
-    const ga = oc.GeomAbs_CurveType
-
-    let curveType = 'other'
-    const result: Partial<EdgeGeometryData> = {}
-
-    try {
-      if (curveTypeEnum === ga.GeomAbs_Line) {
-        curveType = 'line'
-      } else if (curveTypeEnum === ga.GeomAbs_Circle) {
-        curveType = 'circle'
-        const circ = adaptor.Circle()
-        result.radius = circ.Radius()
-        const center = circ.Location()
-        result.center = [center.X(), center.Y(), center.Z()]
-        const dir = circ.Axis().Direction()
-        result.axis = [dir.X(), dir.Y(), dir.Z()]
-      } else if (curveTypeEnum === ga.GeomAbs_Ellipse) {
-        curveType = 'ellipse'
-      } else if (curveTypeEnum === ga.GeomAbs_BSplineCurve) {
-        curveType = 'bspline'
-      } else if (curveTypeEnum === ga.GeomAbs_BezierCurve) {
-        curveType = 'bezier'
-      }
-    } catch { /* ignore */ }
-
-    // 提取起止点
-    const uFirst = adaptor.FirstParameter()
-    const uLast = adaptor.LastParameter()
-    result.startAngle = uFirst
-    result.endAngle = uLast
-
-    try {
-      const pStart = r(new oc.gp_Pnt_1())
-      adaptor.D0(uFirst, pStart)
-      result.startPoint = [pStart.X(), pStart.Y(), pStart.Z()]
-
-      const pEnd = r(new oc.gp_Pnt_1())
-      adaptor.D0(uLast, pEnd)
-      result.endPoint = [pEnd.X(), pEnd.Y(), pEnd.Z()]
-    } catch {
-      result.startPoint = [0, 0, 0]
-      result.endPoint = [0, 0, 0]
-    }
-
-    // 计算长度
-    let length = 0
-    try {
-      length = oc.GCPnts_AbscissaPoint.Length_3(adaptor)
-    } catch {
-      // 回退：用起止点距离估算
-      if (result.startPoint && result.endPoint) {
-        const dx = result.endPoint[0] - result.startPoint[0]
-        const dy = result.endPoint[1] - result.startPoint[1]
-        const dz = result.endPoint[2] - result.startPoint[2]
-        length = Math.sqrt(dx * dx + dy * dy + dz * dz)
-      }
-    }
-    result.length = length
+    const ixx = m[0],
+      ixy = m[1],
+      ixz = m[2],
+      iyy = m[4],
+      iyz = m[5],
+      izz = m[8];
+    if (!isPhysicallyValidInertia(ixx, ixy, ixz, iyy, iyz, izz)) return undefined;
 
     return {
-      curveType,
-      length: result.length || 0,
-      startPoint: result.startPoint || [0, 0, 0],
-      endPoint: result.endPoint || [0, 0, 0],
-      radius: result.radius,
-      center: result.center,
-      axis: result.axis,
-      startAngle: result.startAngle,
-      endAngle: result.endAngle
-    }
-  })
+      volume,
+      com: [com.x, com.y, com.z],
+      inertiaAtCom: [
+        ixx * MM5_TO_M5,
+        ixy * MM5_TO_M5,
+        ixz * MM5_TO_M5,
+        iyy * MM5_TO_M5,
+        iyz * MM5_TO_M5,
+        izz * MM5_TO_M5,
+      ],
+    };
+  } catch {
+    return undefined;
+  }
 }
 
-/**
- * 离散化单条边为折线点序列
- */
-function discretizeEdge(edge: any): number[] {
-  return withGC((r) => {
-    const adaptor = r(new oc.BRepAdaptor_Curve_2(edge))
-    const points: number[] = []
+function checkCircularPlaneFace(
+  positions: Float32Array,
+  startVertex: number,
+  vertexCount: number,
+): FaceGeometryData | null {
+  if (vertexCount < 6) return null;
 
+  let cx = 0,
+    cy = 0,
+    cz = 0;
+  for (let i = 0; i < vertexCount; i++) {
+    const vi = (startVertex + i) * 3;
+    cx += positions[vi];
+    cy += positions[vi + 1];
+    cz += positions[vi + 2];
+  }
+  cx /= vertexCount;
+  cy /= vertexCount;
+  cz /= vertexCount;
+
+  let sumDist = 0;
+  for (let i = 0; i < vertexCount; i++) {
+    const vi = (startVertex + i) * 3;
+    sumDist += Math.hypot(positions[vi] - cx, positions[vi + 1] - cy, positions[vi + 2] - cz);
+  }
+  const avgDist = sumDist / vertexCount;
+  if (avgDist < 0.001) return null;
+
+  const tolerance = avgDist * 0.1;
+  for (let i = 0; i < vertexCount; i++) {
+    const vi = (startVertex + i) * 3;
+    const d = Math.hypot(positions[vi] - cx, positions[vi + 1] - cy, positions[vi + 2] - cz);
+    if (Math.abs(d - avgDist) >= tolerance) return null;
+  }
+
+  return { type: "circle", center: [cx, cy, cz], radius: avgDist };
+}
+
+function orientFaceNormals(
+  positions: Float32Array,
+  normals: Float32Array,
+  indices: Uint32Array,
+  indexStart: number,
+  indexCount: number,
+): void {
+  const end = Math.min(indexStart + indexCount, indices.length);
+  let agree = 0;
+  let disagree = 0;
+
+  for (let i = indexStart; i + 2 < end; i += 3) {
+    const i0 = indices[i] * 3;
+    const i1 = indices[i + 1] * 3;
+    const i2 = indices[i + 2] * 3;
+
+    const ux = positions[i1] - positions[i0];
+    const uy = positions[i1 + 1] - positions[i0 + 1];
+    const uz = positions[i1 + 2] - positions[i0 + 2];
+    const vx = positions[i2] - positions[i0];
+    const vy = positions[i2 + 1] - positions[i0 + 1];
+    const vz = positions[i2 + 2] - positions[i0 + 2];
+
+    const gx = uy * vz - uz * vy;
+    const gy = uz * vx - ux * vz;
+    const gz = ux * vy - uy * vx;
+
+    const nx = normals[i0] + normals[i1] + normals[i2];
+    const ny = normals[i0 + 1] + normals[i1 + 1] + normals[i2 + 1];
+    const nz = normals[i0 + 2] + normals[i1 + 2] + normals[i2 + 2];
+
+    if (Math.hypot(nx, ny, nz) < 1e-9 || Math.hypot(gx, gy, gz) < 1e-12) continue;
+
+    if (gx * nx + gy * ny + gz * nz >= 0) agree++;
+    else disagree++;
+  }
+
+  if (disagree <= agree) return;
+
+  const seen = new Set<number>();
+  for (let i = indexStart; i < end; i++) seen.add(indices[i]);
+  for (const v of seen) {
+    const o = v * 3;
+    normals[o] = -normals[o];
+    normals[o + 1] = -normals[o + 1];
+    normals[o + 2] = -normals[o + 2];
+  }
+}
+
+function refineFaceGeometry(
+  geom: FaceGeometryData,
+  positions: Float32Array,
+  indices: Uint32Array,
+  indexStart: number,
+  indexCount: number,
+): FaceGeometryData {
+  if (geom.type !== "plane" || indexCount === 0) return geom;
+
+  const seen = new Set<number>();
+  const end = Math.min(indexStart + indexCount, indices.length);
+  for (let i = indexStart; i < end; i++) seen.add(indices[i]);
+  const unique = Array.from(seen);
+  if (unique.length < 6) return geom;
+
+  const packed = new Float32Array(unique.length * 3);
+  for (let i = 0; i < unique.length; i++) {
+    const vi = unique[i] * 3;
+    packed[i * 3] = positions[vi];
+    packed[i * 3 + 1] = positions[vi + 1];
+    packed[i * 3 + 2] = positions[vi + 2];
+  }
+
+  const circle = checkCircularPlaneFace(packed, 0, unique.length);
+  if (!circle) return geom;
+  circle.normal = geom.normal;
+  return circle;
+}
+
+function buildFaceIndexMap(k: OcctKernel, faces: ShapeHandle[]): Map<number, number> {
+  const map = new Map<number, number>();
+  for (let i = 0; i < faces.length; i++) {
     try {
-      // 使用 GCPnts_TangentialDeflection 自适应离散化
-      const deflector = r(new oc.GCPnts_TangentialDeflection_2(
-        adaptor, 0.1, 0.1, 2, 200, 0.0001
-      ))
-      const nbPoints = deflector.NbPoints()
-      for (let i = 1; i <= nbPoints; i++) {
-        const p = deflector.Value(i)
-        points.push(p.X(), p.Y(), p.Z())
+      map.set(k.hashCode(faces[i], HASH_UPPER_BOUND), i);
+    } catch {}
+  }
+  return map;
+}
+
+function buildEdgeAdjacency(
+  k: OcctKernel,
+  solid: ShapeHandle,
+  edgeIndexByHash: Map<number, number>,
+  faceIndexByHash: Map<number, number>,
+): Map<number, number[]> {
+  const adjacency = new Map<number, number[]>();
+  try {
+    const flat = k.edgeToFaceMap(solid, HASH_UPPER_BOUND);
+    let i = 0;
+    while (i + 1 < flat.length) {
+      const edgeHash = flat[i];
+      const count = flat[i + 1];
+      if (!isFinite(count) || count < 0 || i + 2 + count > flat.length) break;
+      const edgeIndex = edgeIndexByHash.get(edgeHash);
+      if (edgeIndex !== undefined && !adjacency.has(edgeIndex)) {
+        const faceIndices: number[] = [];
+        for (let j = 0; j < count; j++) {
+          const faceIndex = faceIndexByHash.get(flat[i + 2 + j]);
+          if (faceIndex !== undefined) faceIndices.push(faceIndex);
+        }
+        adjacency.set(edgeIndex, faceIndices);
       }
-    } catch {
-      // 回退：简单均匀采样
-      try {
-        const uFirst = adaptor.FirstParameter()
-        const uLast = adaptor.LastParameter()
-        const nbSamples = 20
-        for (let i = 0; i <= nbSamples; i++) {
-          const u = uFirst + (uLast - uFirst) * i / nbSamples
-          const p = r(new oc.gp_Pnt_1())
-          adaptor.D0(u, p)
-          points.push(p.X(), p.Y(), p.Z())
-        }
-      } catch { /* ignore */ }
+      i += 2 + count;
     }
-
-    return points
-  })
+  } catch {}
+  return adjacency;
 }
 
-/**
- * 提取 Solid 中所有拓扑边的数据（去重）
- */
-function extractEdgesFromSolid(solidShape: any): {
-  edgeGroups: EdgeGroupInfo[]
-  edgeGeometries: EdgeGeometryData[]
-  edgePolylines: Float32Array
+function extractEdges(
+  k: OcctKernel,
+  solid: ShapeHandle,
+  deflection: number,
+  faceIndexByHash: Map<number, number>,
+): {
+  edgeGroups: EdgeGroupInfo[];
+  edgeGeometries: EdgeGeometryData[];
+  edgePolylines: Float32Array;
 } {
-  const edgeGroups: EdgeGroupInfo[] = []
-  const edgeGeometries: EdgeGeometryData[] = []
-  const allPolylineData: number[] = []
+  const edgeGroups: EdgeGroupInfo[] = [];
+  const edgeGeometries: EdgeGeometryData[] = [];
+  const chunks: Float32Array[] = [];
+  let totalFloats = 0;
+  let polylineOffset = 0;
 
-  // 用 IndexedMapOfShape 去重边
-  const edgeMap = new oc.TopTools_IndexedMapOfShape_1()
-  oc.TopExp.MapShapes_1(solidShape, oc.TopAbs_ShapeEnum.TopAbs_EDGE, edgeMap)
-
-  // 构建 edge → 相邻 face 的映射
-  const edgeFaceMap = new oc.TopTools_IndexedDataMapOfShapeListOfShape_1()
-  oc.TopExp.MapShapesAndAncestors(
-    solidShape,
-    oc.TopAbs_ShapeEnum.TopAbs_EDGE,
-    oc.TopAbs_ShapeEnum.TopAbs_FACE,
-    edgeFaceMap
-  )
-
-  // 构建 face 索引映射（用于查找相邻面索引）
-  const faceMap = new oc.TopTools_IndexedMapOfShape_1()
-  oc.TopExp.MapShapes_1(solidShape, oc.TopAbs_ShapeEnum.TopAbs_FACE, faceMap)
-
-  const nbEdges = edgeMap.Extent()
-  let polylineOffset = 0
-
-  for (let i = 1; i <= nbEdges; i++) {
-    try {
-      const edge = oc.TopoDS.Edge_1(edgeMap.FindKey(i))
-
-      // 跳过退化边（seam 边等）
-      if (oc.BRep_Tool.Degenerated(edge)) continue
-
-      // 提取几何信息
-      const geom = extractEdgeGeometry(edge)
-
-      // 离散化为折线
-      const polyline = discretizeEdge(edge)
-      if (polyline.length < 6) continue // 至少 2 个点
-
-      const edgeIndex = edgeGroups.length
-      const polylineCount = polyline.length / 3
-
-      // 查找相邻面
-      const adjacentFaceIndices: number[] = []
+  try {
+    const edges = k.getSubShapes(solid, "edge");
+    const edgeIndexByHash = new Map<number, number>();
+    for (let i = 0; i < edges.length; i++) {
       try {
-        if (edgeFaceMap.Contains(edgeMap.FindKey(i))) {
-          const faceList = edgeFaceMap.FindFromKey(edgeMap.FindKey(i))
-          const iter = new oc.TopTools_ListIteratorOfListOfShape_2(faceList)
-          for (; iter.More(); iter.Next()) {
-            const adjFace = iter.Value()
-            const faceIdx = faceMap.FindIndex(adjFace)
-            if (faceIdx > 0) {
-              adjacentFaceIndices.push(faceIdx - 1) // 0-based
-            }
-          }
-          iter.delete()
-        }
-      } catch { /* ignore */ }
+        edgeIndexByHash.set(k.hashCode(edges[i], HASH_UPPER_BOUND), i);
+      } catch {}
+    }
+
+    const adjacency = buildEdgeAdjacency(k, solid, edgeIndexByHash, faceIndexByHash);
+    const wire = k.wireframe(solid, deflection);
+
+    for (let g = 0; g < wire.edgeCount; g++) {
+      const floatStart = wire.edgeGroups[g * 3];
+      const floatCount = wire.edgeGroups[g * 3 + 1];
+      const edgeIndex = edgeIndexByHash.get(wire.edgeGroups[g * 3 + 2]);
+      if (edgeIndex === undefined || floatCount < 6) continue;
+
+      const geom = extractEdgeGeometry(k, edges[edgeIndex]);
+      if (geom.length <= DEGENERATE_LENGTH) continue;
+
+      const polyline = wire.points.slice(floatStart, floatStart + floatCount);
+      const polylineCount = floatCount / 3;
 
       edgeGroups.push({
-        edgeIndex,
+        edgeIndex: edgeGroups.length,
         polylineStart: polylineOffset,
         polylineCount,
-        adjacentFaceIndices
-      })
-
-      edgeGeometries.push(geom)
-
-      for (let j = 0; j < polyline.length; j++) {
-        allPolylineData.push(polyline[j])
-      }
-      polylineOffset += polylineCount
-    } catch { /* skip problematic edges */ }
-  }
-
-  edgeMap.delete()
-  edgeFaceMap.delete()
-  faceMap.delete()
-
-  return {
-    edgeGroups,
-    edgeGeometries,
-    edgePolylines: new Float32Array(allPolylineData)
-  }
-}
-
-/**
- * 统计形状中的 Solid 数量（用于进度报告）
- */
-function countSolids(shape: any): number {
-  const explorer = new oc.TopExp_Explorer_2(
-    shape, oc.TopAbs_ShapeEnum.TopAbs_SOLID, oc.TopAbs_ShapeEnum.TopAbs_SHAPE
-  )
-  let count = 0
-  for (; explorer.More(); explorer.Next()) count++
-  explorer.delete()
-  if (count === 0) {
-    const shellExplorer = new oc.TopExp_Explorer_2(
-      shape, oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE
-    )
-    count = shellExplorer.More() ? 1 : 0
-    shellExplorer.delete()
-  }
-  return Math.max(count, 1)
-}
-
-/**
- * 提取单个 Solid 的网格和几何数据
- */
-function extractSingleSolid(solidShape: any, solidIndex: number): SerializedSolidData | null {
-  const allPositions: number[] = []
-  const allNormals: number[] = []
-  const allIndices: number[] = []
-  const faceGroups: FaceGroupInfo[] = []
-  const faceGeometries: FaceGeometryData[] = []
-
-  let globalVertexOffset = 0
-  let faceIndex = 0
-
-  // 遍历 Solid 中的所有 Face
-  const faceExplorer = new oc.TopExp_Explorer_2(
-    solidShape,
-    oc.TopAbs_ShapeEnum.TopAbs_FACE,
-    oc.TopAbs_ShapeEnum.TopAbs_SHAPE
-  )
-
-  for (; faceExplorer.More(); faceExplorer.Next()) {
-    const face = oc.TopoDS.Face_1(faceExplorer.Current())
-
-    // 提取三角化数据
-    const meshData = extractFaceTriangulation(face, globalVertexOffset)
-    if (!meshData) {
-      faceIndex++
-      continue
+        adjacentFaceIndices: adjacency.get(edgeIndex) ?? [],
+      });
+      edgeGeometries.push(geom);
+      chunks.push(polyline);
+      totalFloats += floatCount;
+      polylineOffset += polylineCount;
     }
+  } catch {}
 
-    const indexStart = allIndices.length
+  const edgePolylines = new Float32Array(totalFloats);
+  let writeOffset = 0;
+  for (const chunk of chunks) {
+    edgePolylines.set(chunk, writeOffset);
+    writeOffset += chunk.length;
+  }
 
-    // 合并数据
-    for (let i = 0; i < meshData.positions.length; i++) allPositions.push(meshData.positions[i])
-    for (let i = 0; i < meshData.normals.length; i++) allNormals.push(meshData.normals[i])
-    for (let i = 0; i < meshData.indices.length; i++) allIndices.push(meshData.indices[i])
+  return { edgeGroups, edgeGeometries, edgePolylines };
+}
 
-    faceGroups.push({
-      start: indexStart,
-      count: meshData.indices.length,
-      faceIndex
-    })
+function extractSingleSolid(
+  k: OcctKernel,
+  solid: ShapeHandle,
+  solidIndex: number,
+  deflection: number,
+): SerializedSolidData | null {
+  const mark = k.checkpoint();
+  try {
+    const mesh = k.meshShape(solid, {
+      linearDeflection: deflection,
+      angularDeflection: ANGULAR_DEFLECTION,
+    });
+    if (!mesh || mesh.vertexCount === 0 || mesh.triangleCount === 0) return null;
 
-    // 提取面的精确几何信息
-    let geom = extractFaceGeometry(face)
+    const faces = k.getSubShapes(solid, "face");
+    const faceIndexByHash = buildFaceIndexMap(k, faces);
+    const faceGeometries: FaceGeometryData[] = faces.map((face) => extractFaceGeometry(k, face));
 
-    // 对 PLANE 类型面额外检测是否为圆形
-    if (geom.type === 'plane') {
-      const circleCheck = checkCircularPlaneFace(
-        face,
-        new Float32Array(meshData.positions),
-        0,
-        meshData.vertexCount
-      )
-      if (circleCheck) {
-        // 保留原始法向信息
-        circleCheck.normal = geom.normal
-        geom = circleCheck
+    const faceGroups: FaceGroupInfo[] = [];
+    const groupCount = mesh.faceCount ?? 0;
+    const groups = mesh.faceGroups;
+    if (groups) {
+      for (let g = 0; g < groupCount; g++) {
+        const indexStart = groups[g * 3];
+        const indexCount = groups[g * 3 + 1];
+        const faceIndex = faceIndexByHash.get(groups[g * 3 + 2]);
+        if (faceIndex === undefined || indexCount <= 0) continue;
+        faceGroups.push({ start: indexStart, count: indexCount, faceIndex });
+        orientFaceNormals(mesh.positions, mesh.normals, mesh.indices, indexStart, indexCount);
+        faceGeometries[faceIndex] = refineFaceGeometry(
+          faceGeometries[faceIndex],
+          mesh.positions,
+          mesh.indices,
+          indexStart,
+          indexCount,
+        );
       }
     }
 
-    faceGeometries.push(geom)
+    const edgeData = extractEdges(k, solid, deflection, faceIndexByHash);
 
-    globalVertexOffset += meshData.vertexCount
-    faceIndex++
-  }
-
-  faceExplorer.delete()
-
-  if (allPositions.length === 0) return null
-
-  // 提取拓扑边数据
-  const edgeData = extractEdgesFromSolid(solidShape)
-
-  return {
-    name: `Solid_${solidIndex}`,
-    positions: new Float32Array(allPositions),
-    normals: new Float32Array(allNormals),
-    indices: new Uint32Array(allIndices),
-    faceGroups,
-    faceGeometries,
-    edgeGroups: edgeData.edgeGroups,
-    edgeGeometries: edgeData.edgeGeometries,
-    edgePolylines: edgeData.edgePolylines
+    return {
+      name: `Solid_${solidIndex}`,
+      positions: mesh.positions,
+      normals: mesh.normals,
+      indices: mesh.indices,
+      faceGroups,
+      faceGeometries,
+      edgeGroups: edgeData.edgeGroups,
+      edgeGeometries: edgeData.edgeGeometries,
+      edgePolylines: edgeData.edgePolylines,
+      massProps: computeMassProps(k, solid),
+    };
+  } catch {
+    return null;
+  } finally {
+    k.releaseSince(mark);
   }
 }
 
-// buildTreeData 已移除，改用 parseStepFile 中的统一递归构建
-
-/**
- * 构建单个 Solid 的树节点（含 Edge 子节点）
- */
-function buildSolidTreeNode(solidIndex: number, solidData?: SerializedSolidData): SerializedTreeNode | null {
-  if (!solidData) return null
-
-  const solidNode: SerializedTreeNode = {
-    id: `solid_${solidIndex}`,
-    name: solidData.name || `Solid_${solidIndex}`,
-    type: 'solid',
-    solidIndex,
-    children: []
-  }
-
-  // 添加 Edge 子节点
-  solidData.edgeGeometries.forEach((geom, edgeIdx) => {
-    const edgeTypeName = getEdgeDisplayName(geom.curveType)
-    solidNode.children!.push({
-      id: `solid_${solidIndex}_edge_${edgeIdx}`,
-      name: `${edgeTypeName}_${edgeIdx}`,
-      type: 'edge',
-      solidIndex,
-      edgeIndex: edgeIdx
-    })
-  })
-
-  return solidNode
-}
-
-/**
- * 获取边曲线类型显示名称
- */
 function getEdgeDisplayName(curveType: string): string {
   const names: Record<string, string> = {
-    line: '直线',
-    circle: '圆弧',
-    ellipse: '椭圆弧',
-    bspline: 'B样条曲线',
-    bezier: '贝塞尔曲线',
-    other: '曲线'
-  }
-  return names[curveType] || '边'
+    line: "直线",
+    circle: "圆弧",
+    ellipse: "椭圆弧",
+    bspline: "B样条曲线",
+    bezier: "贝塞尔曲线",
+    other: "曲线",
+  };
+  return names[curveType] || "边";
 }
 
-/**
- * 解析 STEP 文件完整流程
- * ★ 统一递归遍历：同步提取网格数据和构建结构树，保证 solidIndex 严格一致
- * 修复旧版分离遍历导致的树 ↔ 模型索引不对应问题
- */
-function parseStepFile(fileBuffer: ArrayBuffer): {
-  solids: SerializedSolidData[]
-  tree: SerializedTreeNode
-  transferList: Transferable[]
+function buildSolidTreeNode(
+  solidIndex: number,
+  solidData: SerializedSolidData,
+): SerializedTreeNode {
+  return {
+    id: `solid_${solidIndex}`,
+    name: solidData.name || `Solid_${solidIndex}`,
+    type: "solid",
+    solidIndex,
+    children: solidData.edgeGeometries.map((geom, edgeIdx) => ({
+      id: `solid_${solidIndex}_edge_${edgeIdx}`,
+      name: `${getEdgeDisplayName(geom.curveType)}_${edgeIdx}`,
+      type: "edge" as const,
+      solidIndex,
+      edgeIndex: edgeIdx,
+    })),
+  };
+}
+
+interface PendingNode {
+  candidateIndex?: number;
+  id: string;
+  name: string;
+  type: SerializedTreeNode["type"];
+  children: PendingNode[];
+}
+
+function parseStepFile(
+  k: OcctKernel,
+  fileBuffer: ArrayBuffer,
+): {
+  solids: SerializedSolidData[];
+  tree: SerializedTreeNode;
+  transferList: Transferable[];
 } {
-  // 1. 读取 STEP 文件
-  const shape = readStepFile(fileBuffer)
+  const mark = k.checkpoint();
 
-  post({ type: 'progress', stage: '正在三角化模型...', percent: 40 })
+  try {
+    post({ type: "progress", stage: "正在读取 STEP 文件...", percent: 15 });
 
-  // 2. 三角化整个形状
-  withGC((r) => {
-    r(new oc.BRepMesh_IncrementalMesh_2(shape, 0.1, false, 0.5, false))
-  })
-
-  post({ type: 'progress', stage: '正在提取网格数据...', percent: 50 })
-
-  // 3. 统一递归提取网格 + 构建树
-  const totalSolids = countSolids(shape)
-  const solids: SerializedSolidData[] = []
-  let solidIndex = 0
-  let compoundIndex = 0
-
-  /**
-   * 递归处理形状：同时提取 Mesh 和生成 TreeNode
-   * ★ solidIndex 仅在 Solid 实际提取成功时才递增，保证 tree.solidIndex === solids[] 数组下标
-   */
-  function processShape(s: any, depth: number): SerializedTreeNode | null {
-    const sType = s.ShapeType()
-
-    // SOLID → 提取网格 + 生成树节点
-    if (sType === oc.TopAbs_ShapeEnum.TopAbs_SOLID) {
-      const solidData = extractSingleSolid(s, solidIndex)
-      if (!solidData) return null
-      solids.push(solidData)
-      const node = buildSolidTreeNode(solidIndex, solidData)
-      solidIndex++
-      const pct = 50 + Math.round((solidIndex / Math.max(totalSolids, 1)) * 30)
-      post({ type: 'progress', stage: `正在处理实体 ${solidIndex}/${totalSolids}...`, percent: Math.min(pct, 80) })
-      return node
+    let root: ShapeHandle;
+    try {
+      root = k.importStep(fileBuffer);
+    } catch (error) {
+      throw new Error(
+        `STEP 文件读取失败，请检查文件是否损坏: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
+    if (k.isNull(root)) throw new Error("STEP 文件读取失败，请检查文件是否损坏");
 
-    // COMPOUND / COMPSOLID → 递归子形状
-    if (sType === oc.TopAbs_ShapeEnum.TopAbs_COMPOUND ||
-      sType === oc.TopAbs_ShapeEnum.TopAbs_COMPSOLID) {
-      const compId = compoundIndex++
-      const children: SerializedTreeNode[] = []
-      const iter = new oc.TopoDS_Iterator_2(s, true, true)
-      for (; iter.More(); iter.Next()) {
-        const childNode = processShape(iter.Value(), depth + 1)
-        if (childNode) children.push(childNode)
+    post({ type: "progress", stage: "正在分析模型结构...", percent: 35 });
+
+    const candidates: ShapeHandle[] = [];
+    let compoundIndex = 0;
+
+    const collect = (shape: ShapeHandle, depth: number): PendingNode | null => {
+      const shapeType = k.getShapeType(shape);
+
+      if (shapeType === "solid" || shapeType === "shell" || shapeType === "face") {
+        const candidateIndex = candidates.length;
+        candidates.push(shape);
+        return { candidateIndex, id: "", name: "", type: "solid", children: [] };
       }
-      iter.delete()
-      if (children.length === 0) return null
-      // 顶层 Compound 使用 root 类型
-      if (depth === 0) {
-        return { id: 'root', name: 'Model', type: 'root', children }
+
+      if (shapeType === "compound" || shapeType === "compsolid") {
+        const compId = compoundIndex++;
+        const children: PendingNode[] = [];
+        for (const child of k.iterShapes(shape)) {
+          const node = collect(child, depth + 1);
+          if (node) children.push(node);
+        }
+        if (children.length === 0) return null;
+        if (depth === 0) {
+          return { id: "root", name: "Model", type: "root", children };
+        }
+        return {
+          id: `compound_${compId}`,
+          name: `Component_${compId}`,
+          type: "compound",
+          children,
+        };
       }
-      return {
-        id: `compound_${compId}`,
-        name: `Component_${compId}`,
-        type: 'compound',
-        children
+
+      return null;
+    };
+
+    const rootType = k.getShapeType(root);
+    const isCompound = rootType === "compound" || rootType === "compsolid";
+    const pendingRoot = isCompound
+      ? collect(root, 0)
+      : {
+          id: "root",
+          name: "Model",
+          type: "root" as const,
+          children: [collect(root, 1)].filter(Boolean) as PendingNode[],
+        };
+
+    const deflection = computeDeflection(k, root);
+    const solids: SerializedSolidData[] = [];
+    const indexMap = new Int32Array(candidates.length).fill(-1);
+
+    for (let i = 0; i < candidates.length; i++) {
+      const solidData = extractSingleSolid(k, candidates[i], solids.length, deflection);
+      if (solidData) {
+        indexMap[i] = solids.length;
+        solids.push(solidData);
+      }
+
+      const done = i + 1;
+      post({
+        type: "progress",
+        stage: `正在处理实体 ${done}/${candidates.length}...`,
+        percent: Math.min(40 + Math.round((done / Math.max(candidates.length, 1)) * 45), 85),
+      });
+    }
+
+    const materialize = (node: PendingNode): SerializedTreeNode | null => {
+      if (node.candidateIndex !== undefined) {
+        const solidIndex = indexMap[node.candidateIndex];
+        if (solidIndex < 0) return null;
+        return buildSolidTreeNode(solidIndex, solids[solidIndex]);
+      }
+      const children = node.children
+        .map(materialize)
+        .filter((n): n is SerializedTreeNode => n !== null);
+      if (children.length === 0) return null;
+      return { id: node.id, name: node.name, type: node.type, children };
+    };
+
+    const tree = (pendingRoot && materialize(pendingRoot)) || {
+      id: "root",
+      name: "Model",
+      type: "root" as const,
+      children: [],
+    };
+
+    post({ type: "progress", stage: "正在传输数据...", percent: 90 });
+
+    const transferList: Transferable[] = [];
+    for (const solid of solids) {
+      transferList.push(solid.positions.buffer);
+      transferList.push(solid.normals.buffer);
+      transferList.push(solid.indices.buffer);
+      if (solid.edgePolylines.byteLength > 0) {
+        transferList.push(solid.edgePolylines.buffer);
       }
     }
 
-    // SHELL / FACE 等 → 作为单个 Solid 提取
-    if (sType === oc.TopAbs_ShapeEnum.TopAbs_SHELL ||
-      sType === oc.TopAbs_ShapeEnum.TopAbs_FACE) {
-      const solidData = extractSingleSolid(s, solidIndex)
-      if (!solidData) return null
-      solids.push(solidData)
-      const node = buildSolidTreeNode(solidIndex, solidData)
-      solidIndex++
-      return node
-    }
-
-    return null
+    return { solids, tree, transferList };
+  } finally {
+    k.releaseSince(mark);
   }
-
-  const shapeType = shape.ShapeType()
-  let tree: SerializedTreeNode
-
-  if (shapeType === oc.TopAbs_ShapeEnum.TopAbs_COMPOUND ||
-    shapeType === oc.TopAbs_ShapeEnum.TopAbs_COMPSOLID) {
-    tree = processShape(shape, 0) || { id: 'root', name: 'Model', type: 'root', children: [] }
-  } else {
-    const childNode = processShape(shape, 1)
-    tree = {
-      id: 'root',
-      name: 'Model',
-      type: 'root',
-      children: childNode ? [childNode] : []
-    }
-  }
-
-  post({ type: 'progress', stage: '正在传输数据...', percent: 85 })
-
-  // 4. 收集 Transferable
-  const transferList: Transferable[] = []
-  for (const solid of solids) {
-    transferList.push(solid.positions.buffer)
-    transferList.push(solid.normals.buffer)
-    transferList.push(solid.indices.buffer)
-    if (solid.edgePolylines.byteLength > 0) {
-      transferList.push(solid.edgePolylines.buffer)
-    }
-  }
-
-  // 5. 清理 shape
-  try { shape.delete() } catch { /* ignore */ }
-
-  return { solids, tree, transferList }
 }
 
-// ============ Comlink API ============
-
-import * as Comlink from 'comlink'
-
-/** 进度回调类型 */
-export type ProgressCallback = (stage: string, percent: number) => void
-
-/**
- * Worker 暴露的 API（通过 Comlink 调用）
- */
-const workerApi = {
-  /**
-   * 初始化 OpenCascade WASM
-   */
+export const workerApi = {
   async init(): Promise<void> {
-    await initOC()
+    await initKernel();
   },
 
-  /**
-   * 解析 STEP 文件
-   * @param fileBuffer STEP 文件二进制数据
-   * @param onProgress 进度回调（通过 Comlink.proxy 传递）
-   */
   async parse(
     fileBuffer: ArrayBuffer,
-    onProgress?: ProgressCallback
+    onProgress?: ProgressCallback,
   ): Promise<{ solids: SerializedSolidData[]; tree: SerializedTreeNode }> {
-    // 覆盖 post 函数以使用 Comlink 进度回调
-    const origPost = (self as any).__origPost
-    if (onProgress) {
-      // 劫持 post 以转发 progress 事件到 Comlink 回调
-      ; (self as any).__progressCb = onProgress
-    }
-
-    await initOC()
-
-    // 解析 STEP 文件
-    const { solids, tree } = parseStepFile(fileBuffer)
-
-      ; (self as any).__progressCb = null
-    return { solids, tree }
-  }
-}
-
-// 劫持 post 函数，使 progress 事件可通过 Comlink 回调转发
-const origPost = post
-  ; (self as any).__origPost = origPost
-
-// 重写 post 以支持 Comlink 模式
-function postHook(msg: WorkerResponse, transfer?: Transferable[]): void {
-  if (msg.type === 'progress' && (self as any).__progressCb) {
+    progressCb = onProgress ?? null;
     try {
-      ; (self as any).__progressCb(msg.stage, msg.percent)
-    } catch { /* ignore callback errors */ }
-  }
-  // 仍然发送原始 postMessage 以保持兼容性
-  origPost(msg, transfer)
-}
+      const k = await initKernel();
+      const { solids, tree } = parseStepFile(k, fileBuffer);
+      return { solids, tree };
+    } finally {
+      progressCb = null;
+    }
+  },
+};
 
-// 替换全局 post
-; (post as any) = postHook
+export type StepParseWorkerApi = typeof workerApi;
 
-export type StepParseWorkerApi = typeof workerApi
-
-Comlink.expose(workerApi)
-
-// ============ 传统 postMessage API（保持向后兼容） ============
+Comlink.expose(workerApi);
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
-  // 如果消息由 Comlink 处理，则跳过
-  if (event.data && typeof event.data === 'object' && !('type' in event.data)) return
+  if (event.data && typeof event.data === "object" && !("type" in event.data)) return;
 
-  const request = event.data
+  const request = event.data;
 
   try {
     switch (request.type) {
-      case 'init': {
-        await initOC()
-        origPost({ type: 'ready' })
-        break
+      case "init": {
+        await initKernel();
+        post({ type: "ready" });
+        break;
       }
 
-      case 'parse': {
-        await initOC()
-        const { solids, tree, transferList } = parseStepFile(request.fileBuffer)
-        origPost({ type: 'progress', stage: '传输数据中...', percent: 95 })
-        origPost(
-          { type: 'result', solids, tree, success: true },
-          transferList
-        )
-        break
+      case "parse": {
+        const k = await initKernel();
+        const { solids, tree, transferList } = parseStepFile(k, request.fileBuffer);
+        post({ type: "progress", stage: "传输数据中...", percent: 95 });
+        post({ type: "result", solids, tree, success: true }, transferList);
+        break;
       }
     }
   } catch (error) {
-    origPost({
-      type: 'error',
-      message: error instanceof Error ? error.message : '未知解析错误'
-    })
+    post({
+      type: "error",
+      message: error instanceof Error ? error.message : "未知解析错误",
+    });
   }
-}
+};
 
-// 通知主线程 Worker 已加载
-origPost({ type: 'progress', stage: 'Worker 已就绪', percent: 0 })
+post({ type: "progress", stage: "Worker 已就绪", percent: 0 });

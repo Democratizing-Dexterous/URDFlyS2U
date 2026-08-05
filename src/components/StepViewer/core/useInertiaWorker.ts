@@ -1,154 +1,187 @@
-/**
- * 惯性计算 Worker Composable
- * 使用单例模式管理 InertiaWorker 实例和 Comlink 代理
- */
+import type { InertiaWorkerApi } from "./InertiaWorker";
+import type {
+  SerializedSolidData,
+  InertialParams,
+  SolidInertiaResult,
+  SolidMassEntry,
+} from "../types";
+import { createWorkerClient } from "./workerClient";
 
-import * as Comlink from 'comlink'
-import type { InertiaWorkerApi } from './InertiaWorker'
-import type { SerializedSolidData, InertialParams } from '../types'
+const EMPTY_F32 = new Float32Array(0);
 
-let worker: Worker | null = null
-let workerProxy: Comlink.Remote<InertiaWorkerApi> | null = null
-let initPromise: Promise<void> | null = null
+const client = createWorkerClient<InertiaWorkerApi>(
+  () => new Worker(new URL("./InertiaWorker.ts", import.meta.url), { type: "module" }),
+  (proxy) => proxy.init(),
+);
 
-/**
- * 获取或创建 Worker 实例（单例），并确保 OC 已初始化
- */
-async function getProxy(): Promise<Comlink.Remote<InertiaWorkerApi>> {
-  if (!workerProxy) {
-    worker = new Worker(
-      new URL('./InertiaWorker.ts', import.meta.url),
-      { type: 'module' }
-    )
-    workerProxy = Comlink.wrap<InertiaWorkerApi>(worker)
-  }
-  if (!initPromise) {
-    initPromise = workerProxy.init()
-  }
-  await initPromise
-  return workerProxy
-}
-
-/**
- * 计算单个 Link 的惯性参数（质量、质心、惯性张量）
- * @param solidDataList  Link 绑定的所有 Solid 序列化数据
- * @param density        材料密度 (kg/m³)
- * @returns InertialParams
- */
-export async function computeLinkInertia(
-  solidDataList: SerializedSolidData[],
-  density: number
-): Promise<InertialParams> {
-  const proxy = await getProxy()
-  // InertiaWorker 仅使用 positions 和 indices 字段。
-  // solidDataList 来自 Vue reactive store，对象被 Proxy 包裹，
-  // 浏览器 postMessage 的 structuredClone 不支持 Proxy → 会抛出 DataCloneError。
-  // 解决方案：提取所需字段重建纯数据对象（不复制 TypedArray 内容，仅重新包装）。
-  const plainList: SerializedSolidData[] = solidDataList.map(d => ({
-    name: d.name ?? '',
+function toPlainSolidData(solidDataList: SerializedSolidData[]): SerializedSolidData[] {
+  return solidDataList.map((d) => ({
+    name: d.name ?? "",
     positions: d.positions,
-    normals: d.normals ?? new Float32Array(0),
+    normals: d.normals ?? EMPTY_F32,
     indices: d.indices,
     faceGroups: [],
     faceGeometries: [],
     edgeGroups: [],
     edgeGeometries: [],
-    edgePolylines: new Float32Array(0),
-  }))
-  return proxy.computeInertia(plainList, density)
+    edgePolylines: EMPTY_F32,
+    massProps: d.massProps,
+  }));
 }
 
-/**
- * 计算各连杆在 density=1 时的原始参考惯性（正比于体积，不做 totalMass 缩放）。
- * 供调用方按需自定义每个连杆的质量并推算惯性张量。
- *
- * 关系：inertia_at_mass = refInertia × (mass / refMass)
- *
- * @param links  需要计算的 Link 列表
- * @returns      Map<linkId, InertialParams>（density=1 原始值）
- */
-export async function computeRefInertias(
-  links: { linkId: string; solidDataList: SerializedSolidData[] }[]
-): Promise<Map<string, InertialParams>> {
-  const validLinks = links.filter(l => l.solidDataList.length > 0)
-  if (validLinks.length === 0) return new Map()
+export async function computePerSolidInertia(
+  solidDataList: SerializedSolidData[],
+): Promise<SolidInertiaResult[]> {
+  const proxy = await client.ready();
+  return proxy.computePerSolidInertia(toPlainSolidData(solidDataList));
+}
 
-  const result = new Map<string, InertialParams>()
-  for (const l of validLinks) {
-    try {
-      const r = await computeLinkInertia(l.solidDataList, 1)
-      if (r.mass > 0) result.set(l.linkId, r)
-    } catch {
-      // 单个 Link 失败不影响其他
+export function combineSolidInertia(entries: SolidMassEntry[]): InertialParams {
+  const valid = entries.filter((e) => e.mass > 0 && e.refMass > 0);
+  if (valid.length === 0) {
+    return { mass: 0, com: [0, 0, 0], inertia: [0, 0, 0, 0, 0, 0] };
+  }
+
+  let mass = 0;
+  let cx = 0;
+  let cy = 0;
+  let cz = 0;
+  for (const e of valid) {
+    mass += e.mass;
+    cx += e.mass * e.com[0];
+    cy += e.mass * e.com[1];
+    cz += e.mass * e.com[2];
+  }
+  const com: [number, number, number] = [cx / mass, cy / mass, cz / mass];
+
+  const inertia: InertialParams["inertia"] = [0, 0, 0, 0, 0, 0];
+  for (const e of valid) {
+    const k = e.mass / e.refMass;
+    const dx = (e.com[0] - com[0]) * 1e-3;
+    const dy = (e.com[1] - com[1]) * 1e-3;
+    const dz = (e.com[2] - com[2]) * 1e-3;
+    inertia[0] += e.inertiaAtCom[0] * k + e.mass * (dy * dy + dz * dz);
+    inertia[1] += e.inertiaAtCom[1] * k - e.mass * dx * dy;
+    inertia[2] += e.inertiaAtCom[2] * k - e.mass * dx * dz;
+    inertia[3] += e.inertiaAtCom[3] * k + e.mass * (dx * dx + dz * dz);
+    inertia[4] += e.inertiaAtCom[4] * k - e.mass * dy * dz;
+    inertia[5] += e.inertiaAtCom[5] * k + e.mass * (dx * dx + dy * dy);
+  }
+
+  return { mass, com, inertia };
+}
+
+export function principalAxisQuat(
+  inertia: readonly [number, number, number, number, number, number],
+): [number, number, number, number] {
+  const a = [
+    [inertia[0], inertia[1], inertia[2]],
+    [inertia[1], inertia[3], inertia[4]],
+    [inertia[2], inertia[4], inertia[5]],
+  ];
+  const v = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+  ];
+  const scale = Math.max(Math.abs(a[0][0]), Math.abs(a[1][1]), Math.abs(a[2][2]), 1e-30);
+  const pairs: Array<[number, number]> = [
+    [0, 1],
+    [0, 2],
+    [1, 2],
+  ];
+
+  for (let sweep = 0; sweep < 64; sweep++) {
+    const off = Math.abs(a[0][1]) + Math.abs(a[0][2]) + Math.abs(a[1][2]);
+    if (off <= scale * 1e-14) break;
+    for (const [p, q] of pairs) {
+      const apq = a[p][q];
+      if (Math.abs(apq) <= scale * 1e-18) continue;
+      const theta = (a[q][q] - a[p][p]) / (2 * apq);
+      const sign = theta >= 0 ? 1 : -1;
+      const t = sign / (Math.abs(theta) + Math.sqrt(theta * theta + 1));
+      const c = 1 / Math.sqrt(t * t + 1);
+      const s = t * c;
+      for (let k = 0; k < 3; k++) {
+        const akp = a[k][p];
+        const akq = a[k][q];
+        a[k][p] = c * akp - s * akq;
+        a[k][q] = s * akp + c * akq;
+      }
+      for (let k = 0; k < 3; k++) {
+        const apk = a[p][k];
+        const aqk = a[q][k];
+        a[p][k] = c * apk - s * aqk;
+        a[q][k] = s * apk + c * aqk;
+      }
+      for (let k = 0; k < 3; k++) {
+        const vkp = v[k][p];
+        const vkq = v[k][q];
+        v[k][p] = c * vkp - s * vkq;
+        v[k][q] = s * vkp + c * vkq;
+      }
+      a[p][q] = 0;
+      a[q][p] = 0;
     }
   }
-  return result
+
+  const order = [0, 1, 2].sort((i, j) => a[i][i] - a[j][j]);
+  const m = [
+    [v[0][order[0]], v[0][order[1]], v[0][order[2]]],
+    [v[1][order[0]], v[1][order[1]], v[1][order[2]]],
+    [v[2][order[0]], v[2][order[1]], v[2][order[2]]],
+  ];
+
+  const det =
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+    m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+    m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+  if (det < 0) {
+    m[0][2] = -m[0][2];
+    m[1][2] = -m[1][2];
+    m[2][2] = -m[2][2];
+  }
+
+  const trace = m[0][0] + m[1][1] + m[2][2];
+  let x: number;
+  let y: number;
+  let z: number;
+  let w: number;
+  if (trace > 0) {
+    const s = Math.sqrt(trace + 1) * 2;
+    w = 0.25 * s;
+    x = (m[2][1] - m[1][2]) / s;
+    y = (m[0][2] - m[2][0]) / s;
+    z = (m[1][0] - m[0][1]) / s;
+  } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+    const s = Math.sqrt(1 + m[0][0] - m[1][1] - m[2][2]) * 2;
+    w = (m[2][1] - m[1][2]) / s;
+    x = 0.25 * s;
+    y = (m[0][1] + m[1][0]) / s;
+    z = (m[0][2] + m[2][0]) / s;
+  } else if (m[1][1] > m[2][2]) {
+    const s = Math.sqrt(1 + m[1][1] - m[0][0] - m[2][2]) * 2;
+    w = (m[0][2] - m[2][0]) / s;
+    x = (m[0][1] + m[1][0]) / s;
+    y = 0.25 * s;
+    z = (m[1][2] + m[2][1]) / s;
+  } else {
+    const s = Math.sqrt(1 + m[2][2] - m[0][0] - m[1][1]) * 2;
+    w = (m[1][0] - m[0][1]) / s;
+    x = (m[0][2] + m[2][0]) / s;
+    y = (m[1][2] + m[2][1]) / s;
+    z = 0.25 * s;
+  }
+  if (w < 0) {
+    x = -x;
+    y = -y;
+    z = -z;
+    w = -w;
+  }
+  const n = Math.hypot(x, y, z, w) || 1;
+  return [x / n, y / n, z / n, w / n];
 }
 
-/**
- * 销毁 Worker 实例（页面卸载或不再需要时调用）
- */
 export function disposeInertiaWorker(): void {
-  if (workerProxy) {
-    workerProxy[Comlink.releaseProxy]()
-    workerProxy = null
-  }
-  if (worker) {
-    worker.terminate()
-    worker = null
-  }
-  initPromise = null
-}
-
-/**
- * 整机惯量计算：按体积比分配总质量，批量计算所有 Link 的惯性参数
- *
- * 算法：先以 density=1 计算各 Link 的参考质量（正比于体积），
- * 求和得参考总质量，再用 k = totalMass / totalRefMass 缩放每个 Link 的
- * 质量和惯性张量（质心位置与密度无关，无需缩放）。
- *
- * @param links        需要计算的 Link 列表（solidDataList 为空的 Link 会被跳过）
- * @param totalMass    整机总质量 (kg)
- * @returns            Map<linkId, InertialParams>
- */
-export async function computeAllLinksInertia(
-  links: { linkId: string; solidDataList: SerializedSolidData[] }[],
-  totalMass: number
-): Promise<Map<string, InertialParams>> {
-  // 过滤掉没有几何数据的 Link
-  const validLinks = links.filter(l => l.solidDataList.length > 0)
-  if (validLinks.length === 0) return new Map()
-
-  // 以 density=1 顺序计算各 Link 的参考惯性（质量 = 体积）
-  // 注意：使用顺序计算而非 Promise.all，避免并发向同一 Worker 发送多条消息时
-  // 任意单条失败导致整批结果全部丢失的问题。
-  const refResults: (InertialParams | null)[] = []
-  for (const l of validLinks) {
-    try {
-      const r = await computeLinkInertia(l.solidDataList, 1)
-      refResults.push(r)
-    } catch {
-      // 单个 Link 计算失败时跳过，不影响其余 Link
-      refResults.push(null)
-    }
-  }
-
-  // 仅对计算成功的 Link 求参考总质量
-  const totalRefMass = refResults.reduce<number>((sum, r) => sum + (r?.mass ?? 0), 0)
-  if (totalRefMass <= 0) return new Map()
-
-  const k = totalMass / totalRefMass
-
-  // 按缩放因子分配质量和惯性张量，跳过计算失败的 Link
-  const result = new Map<string, InertialParams>()
-  for (let i = 0; i < validLinks.length; i++) {
-    const ref = refResults[i]
-    if (!ref || ref.mass <= 0) continue   // 零体积或失败的 Link 不写入结果
-    result.set(validLinks[i].linkId, {
-      mass: ref.mass * k,
-      com: ref.com,                                    // 质心位置与密度无关
-      inertia: ref.inertia.map(v => v * k) as InertialParams['inertia'],
-    })
-  }
-  return result
+  client.dispose();
 }
